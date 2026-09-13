@@ -31,14 +31,14 @@
 
 ```sh
 pnpm install --frozen-lockfile
-GITEA_VERSION=1.27.3-fork TAGS='bindata timetzdata' make build
+GITEA_VERSION=1.27.3 TAGS='bindata timetzdata' make build
 ./gitea --version
 ```
 
 Linux 服务器应使用与目标架构匹配的构建产物。也可从**此 fork 工作树**构建自定义镜像：
 
 ```sh
-docker build --build-arg GITEA_VERSION=1.27.3-fork -t gitea-fork:1.27.3 .
+docker build --build-arg GITEA_VERSION=1.27.3 -t gitea-fork:1.27.3 .
 ```
 
 必须使用包含定制的自建产物；官方现成二进制或镜像不包含本 fork 功能。Docker 构建尚需在目标环境验证。
@@ -63,7 +63,7 @@ docker build --build-arg GITEA_VERSION=1.27.3-fork -t gitea-fork:1.27.3 .
 - `make frontend`：通过。
 - `pnpm exec vue-tsc --noEmit`：通过。
 - 修改的前端文件 ESLint：通过。
-- `GITEA_VERSION=1.27.3-fork TAGS='bindata timetzdata' make build`：通过，生成本地 macOS/arm64 程序 `gitea`，包含前端资源。
+- `GITEA_VERSION=1.27.3 TAGS='bindata timetzdata' make build`：通过，生成本地 macOS/arm64 程序 `gitea`，包含前端资源。
 - jAccount、用户权限/资料、活动统计、组织、Issue 索引、模板、Actions 的相关 Go 测试：通过（DB 索引子包无测试）。
 - `make generate-swagger`：通过，包含 badge message API 的 Swagger/OpenAPI 定义。
 - `GITEA_TEST_DATABASE=sqlite go test ./tests/integration -run '^TestForkBadgeMessage$' -count=1`：通过；验证令牌要求和默认分支、branch、tag 的无运行记录响应。
