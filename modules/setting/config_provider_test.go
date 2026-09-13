@@ -62,17 +62,17 @@ key = 123
 
 	// test default behavior
 	assert.Equal(t, "123", ConfigSectionKeyString(sec, "key"))
-	assert.Equal(t, "", ConfigSectionKeyString(secSub, "key"))
+	assert.Empty(t, ConfigSectionKeyString(secSub, "key"))
 	assert.Equal(t, "def", ConfigSectionKeyString(secSub, "key", "def"))
 
 	assert.Equal(t, "123", ConfigInheritedKeyString(secSub, "key"))
 
 	// Workaround for ini package's BuggyKeyOverwritten behavior
-	assert.Equal(t, "", ConfigSectionKeyString(sec, "empty"))
-	assert.Equal(t, "", ConfigSectionKeyString(secSub, "empty"))
+	assert.Empty(t, ConfigSectionKeyString(sec, "empty"))
+	assert.Empty(t, ConfigSectionKeyString(secSub, "empty"))
 	assert.Equal(t, "def", ConfigInheritedKey(secSub, "empty").MustString("def"))
 	assert.Equal(t, "def", ConfigInheritedKey(secSub, "empty").MustString("xyz"))
-	assert.Equal(t, "", ConfigSectionKeyString(sec, "empty"))
+	assert.Empty(t, ConfigSectionKeyString(sec, "empty"))
 	assert.Equal(t, "def", ConfigSectionKeyString(secSub, "empty"))
 }
 
@@ -111,24 +111,6 @@ func TestNewConfigProviderFromFile(t *testing.T) {
 	bs, err = os.ReadFile(testFile)
 	assert.NoError(t, err)
 	assert.Equal(t, "[foo]\nk1 = a\n\n[bar]\nk1 = b\n", string(bs))
-}
-
-func TestNewConfigProviderForLocale(t *testing.T) {
-	// load locale from file
-	localeFile := t.TempDir() + "/locale.ini"
-	_ = os.WriteFile(localeFile, []byte(`k1=a`), 0o644)
-	cfg, err := NewConfigProviderForLocale(localeFile)
-	assert.NoError(t, err)
-	assert.Equal(t, "a", cfg.Section("").Key("k1").String())
-
-	// load locale from bytes
-	cfg, err = NewConfigProviderForLocale([]byte("k1=foo\nk2=bar"))
-	assert.NoError(t, err)
-	assert.Equal(t, "foo", cfg.Section("").Key("k1").String())
-	cfg, err = NewConfigProviderForLocale([]byte("k1=foo\nk2=bar"), []byte("k2=xxx"))
-	assert.NoError(t, err)
-	assert.Equal(t, "foo", cfg.Section("").Key("k1").String())
-	assert.Equal(t, "xxx", cfg.Section("").Key("k2").String())
 }
 
 func TestDisableSaving(t *testing.T) {

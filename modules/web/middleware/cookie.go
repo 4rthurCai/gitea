@@ -9,18 +9,38 @@ import (
 	"net/url"
 	"strings"
 
-	"code.gitea.io/gitea/modules/session"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/session"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
 )
+
+const (
+	CookieWebBannerDismissed = "gitea_disbnr"
+	CookieTheme              = "gitea_theme"
+	cookieRedirectTo         = "redirect_to"
+)
+
+func GetRedirectToCookie(req *http.Request) string {
+	return GetSiteCookie(req, cookieRedirectTo)
+}
 
 // SetRedirectToCookie convenience function to set the RedirectTo cookie consistently
 func SetRedirectToCookie(resp http.ResponseWriter, value string) {
-	SetSiteCookie(resp, "redirect_to", value, 0)
+	SetSiteCookie(resp, cookieRedirectTo, value, 0)
 }
 
 // DeleteRedirectToCookie convenience function to delete most cookies consistently
 func DeleteRedirectToCookie(resp http.ResponseWriter) {
-	SetSiteCookie(resp, "redirect_to", "", -1)
+	SetSiteCookie(resp, cookieRedirectTo, "", -1)
+}
+
+func RedirectLinkUserLogin(req *http.Request) string {
+	if req.Header.Get("X-Gitea-Fetch-Action") != "" {
+		// when building the redirect link for a fetch request, the current link might be a partial page,
+		// so we only redirect to the login page without redirect_to parameter
+		return setting.AppSubURL + "/user/login"
+	}
+	return setting.AppSubURL + "/user/login?redirect_to=" + url.QueryEscape(setting.AppSubURL+req.URL.RequestURI())
 }
 
 // GetSiteCookie returns given cookie value from request header.
@@ -35,21 +55,23 @@ func GetSiteCookie(req *http.Request, name string) string {
 
 // SetSiteCookie returns given cookie value from request header.
 func SetSiteCookie(resp http.ResponseWriter, name, value string, maxAge int) {
+	// Previous versions would use a cookie path with a trailing /.
+	// These are more specific than cookies without a trailing /, so
+	// we need to delete these if they exist.
+	deleteLegacySiteCookie(resp, name)
+
+	// HINT: INSTALL-PAGE-COOKIE-INIT: the cookie system is not properly initialized on the Install page, so there is no CookiePath
 	cookie := &http.Cookie{
 		Name:     name,
 		Value:    url.QueryEscape(value),
 		MaxAge:   maxAge,
-		Path:     setting.SessionConfig.CookiePath,
+		Path:     util.IfZero(setting.SessionConfig.CookiePath, "/"),
 		Domain:   setting.SessionConfig.Domain,
 		Secure:   setting.SessionConfig.Secure,
 		HttpOnly: true,
 		SameSite: setting.SessionConfig.SameSite,
 	}
 	resp.Header().Add("Set-Cookie", cookie.String())
-	// Previous versions would use a cookie path with a trailing /.
-	// These are more specific than cookies without a trailing /, so
-	// we need to delete these if they exist.
-	deleteLegacySiteCookie(resp, name)
 }
 
 // deleteLegacySiteCookie deletes the cookie with the given name at the cookie

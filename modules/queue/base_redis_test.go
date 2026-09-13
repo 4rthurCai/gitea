@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"code.gitea.io/gitea/modules/nosql"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/nosql"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/test"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func waitRedisReady(conn string, dur time.Duration) (ready bool) {
@@ -56,14 +58,12 @@ func TestBaseRedis(t *testing.T) {
 	}()
 	if !waitRedisReady("redis://127.0.0.1:6379/0", 0) {
 		redisServer = redisServerCmd(t)
-		if redisServer == nil && os.Getenv("CI") == "" {
-			t.Skip("redis-server not found")
-			return
+		if redisServer == nil && test.AllowSkipExternalService() {
+			t.Skip("redis server command not found, skipped")
 		}
+		require.NotNil(t, redisServer)
 		assert.NoError(t, redisServer.Start())
-		if !assert.True(t, waitRedisReady("redis://127.0.0.1:6379/0", 5*time.Second), "start redis-server") {
-			return
-		}
+		require.True(t, waitRedisReady("redis://127.0.0.1:6379/0", 5*time.Second), "start redis-server")
 	}
 
 	testQueueBasic(t, newBaseRedisSimple, toBaseConfig("baseRedis", setting.QueueSettings{Length: 10}), false)

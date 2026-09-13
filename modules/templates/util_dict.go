@@ -4,14 +4,15 @@
 package templates
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"html/template"
 	"reflect"
 
-	"code.gitea.io/gitea/modules/container"
-	"code.gitea.io/gitea/modules/json"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/container"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/setting"
 )
 
 func dictMerge(base map[string]any, arg any) bool {
@@ -33,7 +34,7 @@ func dictMerge(base map[string]any, arg any) bool {
 // The dot syntax is highly discouraged because it might cause unclear key conflicts. It's always good to use explicit keys.
 func dict(args ...any) (map[string]any, error) {
 	if len(args)%2 != 0 {
-		return nil, fmt.Errorf("invalid dict constructor syntax: must have key-value pairs")
+		return nil, errors.New("invalid dict constructor syntax: must have key-value pairs")
 	}
 	m := make(map[string]any, len(args)/2)
 	for i := 0; i < len(args); i += 2 {

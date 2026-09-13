@@ -4,20 +4,20 @@
 package project
 
 import (
-	project_model "code.gitea.io/gitea/models/project"
-	"code.gitea.io/gitea/modules/json"
-	"code.gitea.io/gitea/services/context"
+	project_model "gitea.dev/models/project"
+	"gitea.dev/modules/json"
+	"gitea.dev/services/context"
 )
 
 // MoveColumns moves or keeps columns in a project and sorts them inside that project
 func MoveColumns(ctx *context.Context) {
-	project, err := project_model.GetProjectByID(ctx, ctx.ParamsInt64(":id"))
+	project, err := project_model.GetProjectByID(ctx, ctx.PathParamInt64("id"))
 	if err != nil {
 		ctx.NotFoundOrServerError("GetProjectByID", project_model.IsErrProjectNotExist, err)
 		return
 	}
 	if !project.CanBeAccessedByOwnerRepo(ctx.ContextUser.ID, ctx.Repo.Repository) {
-		ctx.NotFound("CanBeAccessedByOwnerRepo", nil)
+		ctx.NotFound(nil)
 		return
 	}
 

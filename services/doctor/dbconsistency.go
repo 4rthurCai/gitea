@@ -6,14 +6,16 @@ package doctor
 import (
 	"context"
 
-	actions_model "code.gitea.io/gitea/models/actions"
-	activities_model "code.gitea.io/gitea/models/activities"
-	"code.gitea.io/gitea/models/db"
-	issues_model "code.gitea.io/gitea/models/issues"
-	"code.gitea.io/gitea/models/migrations"
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
+	actions_model "gitea.dev/models/actions"
+	activities_model "gitea.dev/models/activities"
+	"gitea.dev/models/db"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/models/migrations"
+	repo_model "gitea.dev/models/repo"
+	secret_model "gitea.dev/models/secret"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	issue_service "gitea.dev/services/issue"
 )
 
 type consistencyCheck struct {
@@ -92,7 +94,7 @@ func prepareDBConsistencyChecks() []consistencyCheck {
 			// find issues without existing repository
 			Name:    "Orphaned Issues without existing repository",
 			Counter: issues_model.CountOrphanedIssues,
-			Fixer:   asFixer(issues_model.DeleteOrphanedIssues),
+			Fixer:   asFixer(issue_service.DeleteOrphanedIssues),
 		},
 		// find releases without existing repository
 		genericOrphanCheck("Orphaned Releases without existing repository",
@@ -163,6 +165,24 @@ func prepareDBConsistencyChecks() []consistencyCheck {
 			Counter:      repo_model.CountOrphanedTopics,
 			Fixer:        repo_model.DeleteOrphanedTopics,
 			FixedMessage: "Removed",
+		},
+		{
+			Name:         "Repository level Runners with non-zero owner_id",
+			Counter:      actions_model.CountWrongRepoLevelRunners,
+			Fixer:        actions_model.UpdateWrongRepoLevelRunners,
+			FixedMessage: "Corrected",
+		},
+		{
+			Name:         "Repository level Variables with non-zero owner_id",
+			Counter:      actions_model.CountWrongRepoLevelVariables,
+			Fixer:        actions_model.UpdateWrongRepoLevelVariables,
+			FixedMessage: "Corrected",
+		},
+		{
+			Name:         "Repository level Secrets with non-zero owner_id",
+			Counter:      secret_model.CountWrongRepoLevelSecrets,
+			Fixer:        secret_model.UpdateWrongRepoLevelSecrets,
+			FixedMessage: "Corrected",
 		},
 	}
 

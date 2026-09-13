@@ -6,14 +6,14 @@ package issue
 import (
 	"context"
 
-	issues_model "code.gitea.io/gitea/models/issues"
-	access_model "code.gitea.io/gitea/models/perm/access"
-	user_model "code.gitea.io/gitea/models/user"
-	notify_service "code.gitea.io/gitea/services/notify"
+	issues_model "gitea.dev/models/issues"
+	access_model "gitea.dev/models/perm/access"
+	user_model "gitea.dev/models/user"
+	notify_service "gitea.dev/services/notify"
 )
 
 // ChangeContent changes issue content, as the given user.
-func ChangeContent(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, content string) error {
+func ChangeContent(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, content string, contentVersion int) error {
 	if err := issue.LoadRepo(ctx); err != nil {
 		return err
 	}
@@ -26,7 +26,7 @@ func ChangeContent(ctx context.Context, issue *issues_model.Issue, doer *user_mo
 
 	oldContent := issue.Content
 
-	if err := issues_model.ChangeIssueContent(ctx, issue, doer, content); err != nil {
+	if err := issues_model.ChangeIssueContent(ctx, issue, doer, content, contentVersion); err != nil {
 		return err
 	}
 

@@ -1,19 +1,18 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_14 //nolint
+package v1_14
 
 import (
-	"fmt"
+	"errors"
 	"strconv"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-
-	"xorm.io/xorm"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 )
 
-func UpdateCodeCommentReplies(x *xorm.Engine) error {
+func UpdateCodeCommentReplies(x db.EngineMigration) error {
 	type Comment struct {
 		ID          int64  `xorm:"pk autoincr"`
 		CommitSHA   string `xorm:"VARCHAR(40)"`
@@ -82,7 +81,7 @@ func UpdateCodeCommentReplies(x *xorm.Engine) error {
 			sqlCmd = "SELECT TOP " + strconv.Itoa(batchSize) + " * FROM #temp_comments WHERE " +
 				"(id NOT IN ( SELECT TOP " + strconv.Itoa(start) + " id FROM #temp_comments ORDER BY id )) ORDER BY id"
 		default:
-			return fmt.Errorf("Unsupported database type")
+			return errors.New("Unsupported database type")
 		}
 
 		if err := sess.SQL(sqlCmd).Find(&comments); err != nil {

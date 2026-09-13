@@ -8,12 +8,15 @@ import (
 	"net/url"
 	"testing"
 
-	"code.gitea.io/gitea/models/db"
-	git_model "code.gitea.io/gitea/models/git"
-	"code.gitea.io/gitea/models/unittest"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/git"
-	repo_service "code.gitea.io/gitea/services/repository"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/db"
+	git_model "gitea.dev/models/git"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/git/gitcmd"
+	repo_service "gitea.dev/services/repository"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,7 +29,7 @@ func TestGitPush(t *testing.T) {
 func testGitPush(t *testing.T, u *url.URL) {
 	t.Run("Push branches at once", func(t *testing.T) {
 		runTestGitPush(t, u, func(t *testing.T, gitPath string) (pushed, deleted []string) {
-			for i := 0; i < 100; i++ {
+			for i := range 100 {
 				branchName := fmt.Sprintf("branch-%d", i)
 				pushed = append(pushed, branchName)
 				doGitCreateBranch(gitPath, branchName)(t)
@@ -37,9 +40,48 @@ func testGitPush(t *testing.T, u *url.URL) {
 		})
 	})
 
+	t.Run("Push branches exists", func(t *testing.T) {
+		runTestGitPush(t, u, func(t *testing.T, gitPath string) (pushed, deleted []string) {
+			for i := range 10 {
+				branchName := fmt.Sprintf("branch-%d", i)
+				if i < 5 {
+					pushed = append(pushed, branchName)
+				}
+				doGitCreateBranch(gitPath, branchName)(t)
+			}
+			// only push master and the first 5 branches
+			pushed = append(pushed, "master")
+			args := append([]string{"origin"}, pushed...)
+			doGitPushTestRepository(gitPath, args...)(t)
+
+			pushed = pushed[:0]
+			// do some changes for the first 5 branches created above
+			for i := range 5 {
+				branchName := fmt.Sprintf("branch-%d", i)
+				pushed = append(pushed, branchName)
+				doGitCheckoutWriteFileCommit(localGitAddCommitOptions{
+					LocalRepoPath:   gitPath,
+					CheckoutBranch:  branchName,
+					TreeFilePath:    fmt.Sprintf("file-%s.txt", branchName),
+					TreeFileContent: "file " + branchName,
+				})(t)
+			}
+
+			for i := 5; i < 10; i++ {
+				pushed = append(pushed, fmt.Sprintf("branch-%d", i))
+			}
+			pushed = append(pushed, "master")
+
+			// push all, so that master is not changed
+			doGitPushTestRepository(gitPath, "origin", "--all")(t)
+
+			return pushed, deleted
+		})
+	})
+
 	t.Run("Push branches one by one", func(t *testing.T) {
 		runTestGitPush(t, u, func(t *testing.T, gitPath string) (pushed, deleted []string) {
-			for i := 0; i < 100; i++ {
+			for i := range 100 {
 				branchName := fmt.Sprintf("branch-%d", i)
 				doGitCreateBranch(gitPath, branchName)(t)
 				doGitPushTestRepository(gitPath, "origin", branchName)(t)
@@ -65,14 +107,14 @@ func testGitPush(t *testing.T, u *url.URL) {
 			doGitPushTestRepository(gitPath, "origin", "master")(t) // make sure master is the default branch instead of a branch we are going to delete
 			pushed = append(pushed, "master")
 
-			for i := 0; i < 100; i++ {
+			for i := range 100 {
 				branchName := fmt.Sprintf("branch-%d", i)
 				pushed = append(pushed, branchName)
 				doGitCreateBranch(gitPath, branchName)(t)
 			}
 			doGitPushTestRepository(gitPath, "origin", "--all")(t)
 
-			for i := 0; i < 10; i++ {
+			for i := range 10 {
 				branchName := fmt.Sprintf("branch-%d", i)
 				doGitPushTestRepository(gitPath, "origin", "--delete", branchName)(t)
 				deleted = append(deleted, branchName)
@@ -99,9 +141,46 @@ func testGitPush(t *testing.T, u *url.URL) {
 	})
 }
 
+func TestGitPushVisibilityOption(t *testing.T) {
+	onGiteaRun(t, func(t *testing.T, u *url.URL) {
+		user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
+		repo, err := repo_service.CreateRepository(t.Context(), user, user, repo_service.CreateRepoOptions{
+			Name:          "repo-visibility-option",
+			AutoInit:      false,
+			DefaultBranch: "master",
+			IsPrivate:     false,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, repo)
+
+		gitPath := t.TempDir()
+		doGitInitTestRepository(gitPath)(t)
+
+		oldPath, oldUser := u.Path, u.User
+		defer func() { u.Path, u.User = oldPath, oldUser }()
+		u.Path = repo.FullName() + ".git"
+		u.User = url.UserPassword(user.LowerName, userPassword)
+		doGitAddRemote(gitPath, "origin", u)(t)
+
+		// The first push into an empty repository is a "push-to-create", so the
+		// repo.private push option is honored to set the initial visibility.
+		doGitPushTestRepository(gitPath, "origin", "master", "-o", "repo.private=true")(t)
+		repo = unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: repo.ID})
+		assert.True(t, repo.IsPrivate, "repo.private option should apply on push-to-create")
+
+		// The repository is now populated; a later push must NOT silently flip
+		// visibility, otherwise a repo admin could change it bypassing the audit
+		// trail, webhooks, and notifications a proper settings change would fire.
+		doGitCreateBranch(gitPath, "branch2")(t)
+		doGitPushTestRepository(gitPath, "origin", "branch2", "-o", "repo.private=false")(t)
+		repo = unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: repo.ID})
+		assert.True(t, repo.IsPrivate, "repo.private option must be ignored on an existing repository")
+	})
+}
+
 func runTestGitPush(t *testing.T, u *url.URL, gitOperation func(t *testing.T, gitPath string) (pushed, deleted []string)) {
 	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
-	repo, err := repo_service.CreateRepository(db.DefaultContext, user, user, repo_service.CreateRepoOptions{
+	repo, err := repo_service.CreateRepository(t.Context(), user, user, repo_service.CreateRepoOptions{
 		Name:          "repo-to-push",
 		Description:   "test git push",
 		AutoInit:      false,
@@ -126,15 +205,15 @@ func runTestGitPush(t *testing.T, u *url.URL, gitOperation func(t *testing.T, gi
 
 	doGitAddRemote(gitPath, "origin", u)(t)
 
-	gitRepo, err := git.OpenRepository(git.DefaultContext, gitPath)
+	gitRepo, err := git.OpenRepository(t.Context(), gitPath)
 	require.NoError(t, err)
 	defer gitRepo.Close()
 
 	pushedBranches, deletedBranches := gitOperation(t, gitPath)
 
 	dbBranches := make([]*git_model.Branch, 0)
-	require.NoError(t, db.GetEngine(db.DefaultContext).Where("repo_id=?", repo.ID).Find(&dbBranches))
-	assert.Equalf(t, len(pushedBranches), len(dbBranches), "mismatched number of branches in db")
+	require.NoError(t, db.GetEngine(t.Context()).Where("repo_id=?", repo.ID).Find(&dbBranches))
+	assert.Lenf(t, dbBranches, len(pushedBranches), "mismatched number of branches in db")
 	dbBranchesMap := make(map[string]*git_model.Branch, len(dbBranches))
 	for _, branch := range dbBranches {
 		dbBranchesMap[branch.Name] = branch
@@ -155,5 +234,23 @@ func runTestGitPush(t *testing.T, u *url.URL, gitOperation func(t *testing.T, gi
 		assert.Equal(t, commitID, branch.CommitID)
 	}
 
-	require.NoError(t, repo_service.DeleteRepositoryDirectly(db.DefaultContext, user, repo.ID))
+	require.NoError(t, repo_service.DeleteRepositoryDirectly(t.Context(), repo.ID))
+}
+
+func TestPushPullRefs(t *testing.T) {
+	onGiteaRun(t, func(t *testing.T, u *url.URL) {
+		baseAPITestContext := NewAPITestContext(t, "user2", "repo1", auth_model.AccessTokenScopeWriteRepository, auth_model.AccessTokenScopeWriteUser)
+
+		u.Path = baseAPITestContext.GitPath()
+		u.User = url.UserPassword("user2", userPassword)
+
+		dstPath := t.TempDir()
+		doGitClone(dstPath, u)(t)
+
+		cmd := gitcmd.NewCommand("push", "--delete", "origin", "refs/pull/2/head")
+		stdout, stderr, err := cmd.WithDir(dstPath).RunStdString(t.Context())
+		assert.Error(t, err)
+		assert.Empty(t, stdout)
+		assert.NotContains(t, stderr, "[deleted]", "stderr: %s", stderr)
+	})
 }

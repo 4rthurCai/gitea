@@ -23,19 +23,21 @@ groups:
     labels:
       - type/feature
   -
-    name: API
-    labels:
-      - modifies/api
-  -
     name: ENHANCEMENTS
     labels:
       - type/enhancement
-      - type/refactoring
-      - topic/ui
+  -
+    name: PERFORMANCE
+    labels:
+      - performance/memory
+      - performance/speed
+      - performance/bigrepo
+      - performance/cpu
   -
     name: BUGFIXES
     labels:
       - type/bug
+
   -
     name: TESTING
     labels:

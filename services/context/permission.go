@@ -4,146 +4,127 @@
 package context
 
 import (
+	"context"
 	"net/http"
+	"slices"
 
-	auth_model "code.gitea.io/gitea/models/auth"
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/models/unit"
-	"code.gitea.io/gitea/modules/log"
+	auth_model "gitea.dev/models/auth"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unit"
 )
 
-// RequireRepoAdmin returns a middleware for requiring repository admin permission
-func RequireRepoAdmin() func(ctx *Context) {
-	return func(ctx *Context) {
-		if !ctx.IsSigned || !ctx.Repo.IsAdmin() {
-			ctx.NotFound(ctx.Req.URL.RequestURI(), nil)
-			return
-		}
+// isOwnerHidden reports whether repo's owner is not publicly visible (a limited or private owner), so
+// the owner's repositories must be hidden from callers that may only reach genuinely public resources.
+func isOwnerHidden(ctx context.Context, repo *repo_model.Repository) bool {
+	if err := repo.LoadOwner(ctx); err != nil || repo.Owner == nil {
+		return true // fail closed if the owner visibility can't be determined
 	}
+	return !repo.Owner.Visibility.IsPublic()
 }
 
-// RequireRepoWriter returns a middleware for requiring repository write to the specify unitType
-func RequireRepoWriter(unitType unit.Type) func(ctx *Context) {
-	return func(ctx *Context) {
-		if !ctx.Repo.CanWrite(unitType) {
-			ctx.NotFound(ctx.Req.URL.RequestURI(), nil)
-			return
-		}
+// publicOnlyTokenDeniedRepo reports whether a public-only API token must be denied access to
+// repo. A public-only token may only reach genuinely public resources, so it is denied for
+// private repos and for repos owned by a non-public (limited or private) owner.
+func publicOnlyTokenDeniedRepo(ctx context.Context, repo *repo_model.Repository) bool {
+	if repo == nil {
+		return false
 	}
+	return repo.IsPrivate || isOwnerHidden(ctx, repo)
 }
 
-// CanEnableEditor checks if the user is allowed to write to the branch of the repo
-func CanEnableEditor() func(ctx *Context) {
-	return func(ctx *Context) {
-		if !ctx.Repo.CanWriteToBranch(ctx, ctx.Doer, ctx.Repo.BranchName) {
-			ctx.NotFound("CanWriteToBranch denies permission", nil)
-			return
-		}
+// TokenIsPublicOnly reports whether the request is authenticated by a public-only API token. A
+// non-token request, or a token with no recorded scope, is not public-only.
+func TokenIsPublicOnly(ctx *Context) bool {
+	if ctx.Data["IsApiToken"] != true {
+		return false
 	}
+	scope, ok := ctx.Data["ApiTokenScope"].(auth_model.AccessTokenScope)
+	if !ok {
+		return false
+	}
+	publicOnly, _ := scope.PublicOnly()
+	return publicOnly
 }
 
-// RequireRepoWriterOr returns a middleware for requiring repository write to one of the unit permission
-func RequireRepoWriterOr(unitTypes ...unit.Type) func(ctx *Context) {
-	return func(ctx *Context) {
-		for _, unitType := range unitTypes {
-			if ctx.Repo.CanWrite(unitType) {
-				return
-			}
-		}
-		ctx.NotFound(ctx.Req.URL.RequestURI(), nil)
-	}
-}
-
-// RequireRepoReader returns a middleware for requiring repository read to the specify unitType
-func RequireRepoReader(unitType unit.Type) func(ctx *Context) {
-	return func(ctx *Context) {
-		if !ctx.Repo.CanRead(unitType) {
-			if log.IsTrace() {
-				if ctx.IsSigned {
-					log.Trace("Permission Denied: User %-v cannot read %-v in Repo %-v\n"+
-						"User in Repo has Permissions: %-+v",
-						ctx.Doer,
-						unitType,
-						ctx.Repo.Repository,
-						ctx.Repo.Permission)
-				} else {
-					log.Trace("Permission Denied: Anonymous user cannot read %-v in Repo %-v\n"+
-						"Anonymous user in Repo has Permissions: %-+v",
-						unitType,
-						ctx.Repo.Repository,
-						ctx.Repo.Permission)
-				}
-			}
-			ctx.NotFound(ctx.Req.URL.RequestURI(), nil)
-			return
-		}
-	}
-}
-
-// RequireRepoReaderOr returns a middleware for requiring repository write to one of the unit permission
-func RequireRepoReaderOr(unitTypes ...unit.Type) func(ctx *Context) {
-	return func(ctx *Context) {
-		for _, unitType := range unitTypes {
-			if ctx.Repo.CanRead(unitType) {
-				return
-			}
-		}
-		if log.IsTrace() {
-			var format string
-			var args []any
-			if ctx.IsSigned {
-				format = "Permission Denied: User %-v cannot read ["
-				args = append(args, ctx.Doer)
-			} else {
-				format = "Permission Denied: Anonymous user cannot read ["
-			}
-			for _, unit := range unitTypes {
-				format += "%-v, "
-				args = append(args, unit)
-			}
-
-			format = format[:len(format)-2] + "] in Repo %-v\n" +
-				"User in Repo has Permissions: %-+v"
-			args = append(args, ctx.Repo.Repository, ctx.Repo.Permission)
-			log.Trace(format, args...)
-		}
-		ctx.NotFound(ctx.Req.URL.RequestURI(), nil)
-	}
-}
-
-// CheckRepoScopedToken check whether personal access token has repo scope
-func CheckRepoScopedToken(ctx *Context, repo *repo_model.Repository, level auth_model.AccessTokenScopeLevel) {
-	if !ctx.IsBasicAuth || ctx.Data["IsApiToken"] != true {
+// CheckTokenScopes checks whether the authenticated API token contains any of the given scopes.
+func CheckTokenScopes(ctx *Context, repo *repo_model.Repository, scopes ...auth_model.AccessTokenScope) {
+	if ctx.Data["IsApiToken"] != true {
 		return
 	}
 
 	scope, ok := ctx.Data["ApiTokenScope"].(auth_model.AccessTokenScope)
-	if ok { // it's a personal access token but not oauth2 token
-		var scopeMatched bool
+	if !ok {
+		return
+	}
 
-		requiredScopes := auth_model.GetRequiredScopes(level, auth_model.AccessTokenScopeCategoryRepository)
+	publicOnly, err := scope.PublicOnly()
+	if err != nil {
+		ctx.ServerError("PublicOnly", err)
+		return
+	}
 
-		// check if scope only applies to public resources
-		publicOnly, err := scope.PublicOnly()
-		if err != nil {
-			ctx.ServerError("HasScope", err)
-			return
-		}
+	if publicOnly && publicOnlyTokenDeniedRepo(ctx, repo) {
+		ctx.HTTPError(http.StatusForbidden)
+		return
+	}
 
-		if publicOnly && repo.IsPrivate {
-			ctx.Error(http.StatusForbidden)
-			return
-		}
+	scopeMatched, err := scope.HasAnyScope(scopes...)
+	if err != nil {
+		ctx.ServerError("HasAnyScope", err)
+		return
+	}
 
-		scopeMatched, err = scope.HasScope(requiredScopes...)
-		if err != nil {
-			ctx.ServerError("HasScope", err)
-			return
-		}
+	if !scopeMatched {
+		ctx.HTTPError(http.StatusForbidden)
+	}
+}
 
-		if !scopeMatched {
-			ctx.Error(http.StatusForbidden)
+// RequireRepoAdmin returns a middleware for requiring repository admin permission
+func RequireRepoAdmin() func(ctx *Context) {
+	return func(ctx *Context) {
+		if !ctx.IsSigned || !ctx.Repo.Permission.IsAdmin() {
+			ctx.NotFound(nil)
 			return
 		}
 	}
+}
+
+// CanWriteToBranch checks if the user is allowed to write to the branch of the repo
+func CanWriteToBranch() func(ctx *Context) {
+	return func(ctx *Context) {
+		if !ctx.Repo.CanWriteToBranch(ctx, ctx.Doer, ctx.Repo.BranchName) {
+			ctx.NotFound(nil)
+			return
+		}
+	}
+}
+
+// RequireUnitWriter returns a middleware for requiring repository write to one of the unit permission
+func RequireUnitWriter(unitTypes ...unit.Type) func(ctx *Context) {
+	return func(ctx *Context) {
+		if slices.ContainsFunc(unitTypes, ctx.Repo.Permission.CanWrite) {
+			return
+		}
+		ctx.NotFound(nil)
+	}
+}
+
+// RequireUnitReader returns a middleware for requiring repository write to one of the unit permission
+func RequireUnitReader(unitTypes ...unit.Type) func(ctx *Context) {
+	return func(ctx *Context) {
+		for _, unitType := range unitTypes {
+			if ctx.Repo.Permission.CanRead(unitType) {
+				return
+			}
+			if unitType == unit.TypeCode && canWriteAsMaintainer(ctx) {
+				return
+			}
+		}
+		ctx.NotFound(nil)
+	}
+}
+
+// CheckRepoScopedToken checks whether the authenticated API token has repo scope.
+func CheckRepoScopedToken(ctx *Context, repo *repo_model.Repository, level auth_model.AccessTokenScopeLevel) {
+	CheckTokenScopes(ctx, repo, auth_model.GetRequiredScopes(level, auth_model.AccessTokenScopeCategoryRepository)...)
 }

@@ -4,7 +4,6 @@
 package bleve
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -12,22 +11,25 @@ import (
 	"strings"
 	"time"
 
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/modules/analyze"
-	"code.gitea.io/gitea/modules/charset"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/indexer/code/internal"
-	indexer_internal "code.gitea.io/gitea/modules/indexer/internal"
-	inner_bleve "code.gitea.io/gitea/modules/indexer/internal/bleve"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/modules/typesniffer"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/modules/analyze"
+	"gitea.dev/modules/charset"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/git/gitcmd"
+	"gitea.dev/modules/gitrepo"
+	"gitea.dev/modules/indexer"
+	path_filter "gitea.dev/modules/indexer/code/bleve/token/path"
+	"gitea.dev/modules/indexer/code/internal"
+	indexer_internal "gitea.dev/modules/indexer/internal"
+	inner_bleve "gitea.dev/modules/indexer/internal/bleve"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/timeutil"
+	"gitea.dev/modules/typesniffer"
+	"gitea.dev/modules/util"
 
 	"github.com/blevesearch/bleve/v2"
 	analyzer_custom "github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
 	analyzer_keyword "github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
-	"github.com/blevesearch/bleve/v2/analysis/token/camelcase"
 	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
 	"github.com/blevesearch/bleve/v2/analysis/token/unicodenorm"
 	"github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
@@ -53,6 +55,7 @@ type RepoIndexerData struct {
 	RepoID    int64
 	CommitID  string
 	Content   string
+	Filename  string
 	Language  string
 	UpdatedAt time.Time
 }
@@ -64,8 +67,9 @@ func (d *RepoIndexerData) Type() string {
 
 const (
 	repoIndexerAnalyzer      = "repoIndexerAnalyzer"
+	filenameIndexerAnalyzer  = "filenameIndexerAnalyzer"
 	repoIndexerDocType       = "repoIndexerDocType"
-	repoIndexerLatestVersion = 6
+	repoIndexerLatestVersion = 10
 )
 
 // generateBleveIndexMapping generates a bleve index mapping for the repo indexer
@@ -79,6 +83,11 @@ func generateBleveIndexMapping() (mapping.IndexMapping, error) {
 	textFieldMapping.IncludeInAll = false
 	docMapping.AddFieldMappingsAt("Content", textFieldMapping)
 
+	fileNamedMapping := bleve.NewTextFieldMapping()
+	fileNamedMapping.IncludeInAll = false
+	fileNamedMapping.Analyzer = filenameIndexerAnalyzer
+	docMapping.AddFieldMappingsAt("Filename", fileNamedMapping)
+
 	termFieldMapping := bleve.NewTextFieldMapping()
 	termFieldMapping.IncludeInAll = false
 	termFieldMapping.Analyzer = analyzer_keyword.Name
@@ -90,16 +99,27 @@ func generateBleveIndexMapping() (mapping.IndexMapping, error) {
 	docMapping.AddFieldMappingsAt("UpdatedAt", timeFieldMapping)
 
 	mapping := bleve.NewIndexMapping()
+
 	if err := addUnicodeNormalizeTokenFilter(mapping); err != nil {
 		return nil, err
 	} else if err := mapping.AddCustomAnalyzer(repoIndexerAnalyzer, map[string]any{
 		"type":          analyzer_custom.Name,
 		"char_filters":  []string{},
-		"tokenizer":     unicode.Name,
-		"token_filters": []string{unicodeNormalizeName, camelcase.Name, lowercase.Name},
+		"tokenizer":     codeTokenizerName,
+		"token_filters": []string{unicodeNormalizeName, codeTokenFilterName, lowercase.Name},
 	}); err != nil {
 		return nil, err
 	}
+
+	if err := mapping.AddCustomAnalyzer(filenameIndexerAnalyzer, map[string]any{
+		"type":          analyzer_custom.Name,
+		"char_filters":  []string{},
+		"tokenizer":     unicode.Name,
+		"token_filters": []string{unicodeNormalizeName, path_filter.Name, lowercase.Name},
+	}); err != nil {
+		return nil, err
+	}
+
 	mapping.DefaultAnalyzer = repoIndexerAnalyzer
 	mapping.AddDocumentMapping(repoIndexerDocType, docMapping)
 	mapping.AddDocumentMapping("_all", bleve.NewDocumentDisabledMapping())
@@ -115,6 +135,10 @@ type Indexer struct {
 	indexer_internal.Indexer // do not composite inner_bleve.Indexer directly to avoid exposing too much
 }
 
+func (b *Indexer) SupportedSearchModes() []indexer.SearchMode {
+	return indexer.SearchModesExactWords()
+}
+
 // NewIndexer creates a new bleve local indexer
 func NewIndexer(indexDir string) *Indexer {
 	inner := inner_bleve.NewIndexer(indexDir, repoIndexerLatestVersion, generateBleveIndexMapping)
@@ -124,7 +148,7 @@ func NewIndexer(indexDir string) *Indexer {
 	}
 }
 
-func (b *Indexer) addUpdate(ctx context.Context, batchWriter git.WriteCloserError, batchReader *bufio.Reader, commitSha string,
+func (b *Indexer) addUpdate(ctx context.Context, catFileBatch git.CatFileBatch, commitSha string,
 	update internal.FileUpdate, repo *repo_model.Repository, batch *inner_bleve.FlushingBatch,
 ) error {
 	// Ignore vendored files in code search
@@ -137,7 +161,7 @@ func (b *Indexer) addUpdate(ctx context.Context, batchWriter git.WriteCloserErro
 	var err error
 	if !update.Sized {
 		var stdout string
-		stdout, _, err = git.NewCommand(ctx, "cat-file", "-s").AddDynamicArguments(update.BlobSha).RunStdString(&git.RunOpts{Dir: repo.RepoPath()})
+		stdout, _, err = gitrepo.RunCmdString(ctx, repo, gitcmd.NewCommand("cat-file", "-s").AddDynamicArguments(update.BlobSha))
 		if err != nil {
 			return err
 		}
@@ -150,21 +174,17 @@ func (b *Indexer) addUpdate(ctx context.Context, batchWriter git.WriteCloserErro
 		return b.addDelete(update.Filename, repo, batch)
 	}
 
-	if _, err := batchWriter.Write([]byte(update.BlobSha + "\n")); err != nil {
-		return err
-	}
-
-	_, _, size, err = git.ReadBatchLine(batchReader)
+	info, batchReader, err := catFileBatch.QueryContent(update.BlobSha)
 	if err != nil {
 		return err
 	}
-
-	fileContents, err := io.ReadAll(io.LimitReader(batchReader, size))
+	fileContents, err := io.ReadAll(io.LimitReader(batchReader, info.Size))
 	if err != nil {
 		return err
 	} else if !typesniffer.DetectContentType(fileContents).IsText() {
 		// FIXME: UTF-16 files will probably fail here
-		return nil
+		// Even if the file is not recognized as a "text file", we could still put its name into the indexers to make the filename become searchable, while leave the content to empty.
+		fileContents = nil
 	}
 
 	if _, err = batchReader.Discard(1); err != nil {
@@ -174,7 +194,8 @@ func (b *Indexer) addUpdate(ctx context.Context, batchWriter git.WriteCloserErro
 	return batch.Index(id, &RepoIndexerData{
 		RepoID:    repo.ID,
 		CommitID:  commitSha,
-		Content:   string(charset.ToUTF8DropErrors(fileContents, charset.ConvertOpts{})),
+		Filename:  update.Filename,
+		Content:   string(charset.ToUTF8DropErrors(fileContents)),
 		Language:  analyze.GetCodeLanguage(update.Filename, fileContents),
 		UpdatedAt: time.Now().UTC(),
 	})
@@ -189,21 +210,17 @@ func (b *Indexer) addDelete(filename string, repo *repo_model.Repository, batch 
 func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *internal.RepoChanges) error {
 	batch := inner_bleve.NewFlushingBatch(b.inner.Indexer, maxBatchSize)
 	if len(changes.Updates) > 0 {
-		// Now because of some insanity with git cat-file not immediately failing if not run in a valid git directory we need to run git rev-parse first!
-		if err := git.EnsureValidGitRepository(ctx, repo.RepoPath()); err != nil {
-			log.Error("Unable to open git repo: %s for %-v: %v", repo.RepoPath(), repo, err)
+		catfileBatch, err := gitrepo.NewBatch(ctx, repo)
+		if err != nil {
 			return err
 		}
-
-		batchWriter, batchReader, cancel := git.CatFileBatch(ctx, repo.RepoPath())
-		defer cancel()
+		defer catfileBatch.Close()
 
 		for _, update := range changes.Updates {
-			if err := b.addUpdate(ctx, batchWriter, batchReader, sha, update, repo, batch); err != nil {
+			if err := b.addUpdate(ctx, catfileBatch, sha, update, repo, batch); err != nil {
 				return err
 			}
 		}
-		cancel()
 	}
 	for _, filename := range changes.RemovedFilenames {
 		if err := b.addDelete(filename, repo, batch); err != nil {
@@ -236,15 +253,34 @@ func (b *Indexer) Search(ctx context.Context, opts *internal.SearchOptions) (int
 	var (
 		indexerQuery query.Query
 		keywordQuery query.Query
+		contentQuery query.Query
 	)
 
-	phraseQuery := bleve.NewMatchPhraseQuery(opts.Keyword)
-	phraseQuery.FieldVal = "Content"
-	phraseQuery.Analyzer = repoIndexerAnalyzer
-	keywordQuery = phraseQuery
-	if opts.IsKeywordFuzzy {
-		phraseQuery.Fuzziness = inner_bleve.GuessFuzzinessByKeyword(opts.Keyword)
+	pathQuery := bleve.NewPrefixQuery(strings.ToLower(opts.Keyword))
+	pathQuery.FieldVal = "Filename"
+	pathQuery.SetBoost(10)
+
+	searchMode := util.IfZero(opts.SearchMode, b.SupportedSearchModes()[0].ModeValue)
+	if searchMode == indexer.SearchModeExact {
+		// 1.21 used NewPrefixQuery, but it seems not working well, and later releases changed to NewMatchPhraseQuery
+		q := bleve.NewMatchPhraseQuery(opts.Keyword)
+		q.Analyzer = repoIndexerAnalyzer
+		q.FieldVal = "Content"
+		contentQuery = q
+	} else /* words */ {
+		q := bleve.NewMatchQuery(opts.Keyword)
+		q.FieldVal = "Content"
+		q.Analyzer = repoIndexerAnalyzer
+		if searchMode == indexer.SearchModeFuzzy {
+			// this logic doesn't seem right, it is only used to pass the test-case `Keyword:    "dESCRIPTION"`, which doesn't seem to be a real-life use-case.
+			q.Fuzziness = inner_bleve.GuessFuzzinessByKeyword(opts.Keyword)
+		} else {
+			q.Operator = query.MatchQueryOperatorAnd
+		}
+		contentQuery = q
 	}
+
+	keywordQuery = bleve.NewDisjunctionQuery(contentQuery, pathQuery)
 
 	if len(opts.RepoIDs) > 0 {
 		repoQueries := make([]query.Query, 0, len(opts.RepoIDs))
@@ -275,12 +311,14 @@ func (b *Indexer) Search(ctx context.Context, opts *internal.SearchOptions) (int
 
 	from, pageSize := opts.GetSkipTake()
 	searchRequest := bleve.NewSearchRequestOptions(indexerQuery, pageSize, from, false)
-	searchRequest.Fields = []string{"Content", "RepoID", "Language", "CommitID", "UpdatedAt"}
+	searchRequest.Fields = []string{"Content", "Filename", "RepoID", "Language", "CommitID", "UpdatedAt"}
 	searchRequest.IncludeLocations = true
 
 	if len(opts.Language) == 0 {
 		searchRequest.AddFacet("languages", bleve.NewFacetRequest("Language", 10))
 	}
+
+	searchRequest.SortBy([]string{"-_score", "UpdatedAt"})
 
 	result, err := b.inner.Indexer.SearchInContext(ctx, searchRequest)
 	if err != nil {
@@ -303,6 +341,10 @@ func (b *Indexer) Search(ctx context.Context, opts *internal.SearchOptions) (int
 				endIndex = locationEnd
 			}
 		}
+		if len(hit.Locations["Filename"]) > 0 {
+			startIndex, endIndex = internal.FilenameMatchIndexPos(hit.Fields["Content"].(string))
+		}
+
 		language := hit.Fields["Language"].(string)
 		var updatedUnix timeutil.TimeStamp
 		if t, err := time.Parse(time.RFC3339, hit.Fields["UpdatedAt"].(string)); err == nil {

@@ -1,19 +1,18 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_14 //nolint
+package v1_14
 
 import (
 	"fmt"
 	"regexp"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-
-	"xorm.io/xorm"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 )
 
-func FixPostgresIDSequences(x *xorm.Engine) error {
+func FixPostgresIDSequences(x db.EngineMigration) error {
 	if !setting.Database.Type.IsPostgreSQL() {
 		return nil
 	}

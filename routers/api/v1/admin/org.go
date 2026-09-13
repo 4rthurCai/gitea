@@ -7,14 +7,14 @@ package admin
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/models/organization"
-	user_model "code.gitea.io/gitea/models/user"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/routers/api/v1/utils"
-	"code.gitea.io/gitea/services/context"
-	"code.gitea.io/gitea/services/convert"
+	"gitea.dev/models/db"
+	"gitea.dev/models/organization"
+	user_model "gitea.dev/models/user"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
 )
 
 // CreateOrg api for create organization
@@ -29,7 +29,7 @@ func CreateOrg(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of the user that will own the created organization
+	//   description: username of the user who will own the created organization
 	//   type: string
 	//   required: true
 	// - name: organization
@@ -48,7 +48,7 @@ func CreateOrg(ctx *context.APIContext) {
 
 	visibility := api.VisibleTypePublic
 	if form.Visibility != "" {
-		visibility = api.VisibilityModes[form.Visibility]
+		visibility = api.VisibilityModes[string(form.Visibility)]
 	}
 
 	org := &organization.Organization{
@@ -67,9 +67,9 @@ func CreateOrg(ctx *context.APIContext) {
 			db.IsErrNameReserved(err) ||
 			db.IsErrNameCharsNotAllowed(err) ||
 			db.IsErrNamePatternNotAllowed(err) {
-			ctx.Error(http.StatusUnprocessableEntity, "", err)
+			ctx.APIError(http.StatusUnprocessableEntity, err.Error())
 		} else {
-			ctx.Error(http.StatusInternalServerError, "CreateOrganization", err)
+			ctx.APIErrorInternal(err)
 		}
 		return
 	}
@@ -101,15 +101,15 @@ func GetAllOrgs(ctx *context.APIContext) {
 
 	listOptions := utils.GetListOptions(ctx)
 
-	users, maxResults, err := user_model.SearchUsers(ctx, &user_model.SearchUserOptions{
+	users, maxResults, err := user_model.SearchUsers(ctx, user_model.SearchUserOptions{
 		Actor:       ctx.Doer,
-		Type:        user_model.UserTypeOrganization,
+		Types:       []user_model.UserType{user_model.UserTypeOrganization},
 		OrderBy:     db.SearchOrderByAlphabetically,
 		ListOptions: listOptions,
 		Visible:     []api.VisibleType{api.VisibleTypePublic, api.VisibleTypeLimited, api.VisibleTypePrivate},
 	})
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "SearchOrganizations", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	orgs := make([]*api.Organization, len(users))
@@ -117,7 +117,7 @@ func GetAllOrgs(ctx *context.APIContext) {
 		orgs[i] = convert.ToOrganization(ctx, organization.OrgFromUser(users[i]))
 	}
 
-	ctx.SetLinkHeader(int(maxResults), listOptions.PageSize)
+	ctx.SetLinkHeader(maxResults, listOptions.PageSize)
 	ctx.SetTotalCountHeader(maxResults)
 	ctx.JSON(http.StatusOK, &orgs)
 }

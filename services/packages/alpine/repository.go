@@ -20,15 +20,15 @@ import (
 	"io"
 	"strings"
 
-	packages_model "code.gitea.io/gitea/models/packages"
-	alpine_model "code.gitea.io/gitea/models/packages/alpine"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/container"
-	"code.gitea.io/gitea/modules/json"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	alpine_module "code.gitea.io/gitea/modules/packages/alpine"
-	"code.gitea.io/gitea/modules/util"
-	packages_service "code.gitea.io/gitea/services/packages"
+	packages_model "gitea.dev/models/packages"
+	alpine_model "gitea.dev/models/packages/alpine"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/container"
+	"gitea.dev/modules/json"
+	packages_module "gitea.dev/modules/packages"
+	alpine_module "gitea.dev/modules/packages/alpine"
+	"gitea.dev/modules/util"
+	packages_service "gitea.dev/services/packages"
 )
 
 const (
@@ -72,7 +72,7 @@ func GetOrCreateKeyPair(ctx context.Context, ownerID int64) (string, string, err
 	return priv, pub, nil
 }
 
-// BuildAllRepositoryFiles (re)builds all repository files for every available distributions, components and architectures
+// BuildAllRepositoryFiles (re)builds all repository files for every available branches, repositories and architectures
 func BuildAllRepositoryFiles(ctx context.Context, ownerID int64) error {
 	pv, err := GetOrCreateRepositoryVersion(ctx, ownerID)
 	if err != nil {
@@ -290,7 +290,7 @@ func buildPackagesIndex(ctx context.Context, ownerID int64, repoVersion *package
 
 	privPem, _ := pem.Decode([]byte(priv))
 	if privPem == nil {
-		return fmt.Errorf("failed to decode private key pem")
+		return errors.New("failed to decode private key pem")
 	}
 
 	privKey, err := x509.ParsePKCS1PrivateKey(privPem.Bytes)

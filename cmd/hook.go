@@ -14,35 +14,38 @@ import (
 	"strings"
 	"time"
 
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/private"
-	repo_module "code.gitea.io/gitea/modules/repository"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/git/gitcmd"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/private"
+	repo_module "gitea.dev/modules/repository"
+	"gitea.dev/modules/setting"
 
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 const (
-	hookBatchSize = 30
+	hookBatchSize = 500
 )
 
-var (
-	// CmdHook represents the available hooks sub-command.
-	CmdHook = &cli.Command{
+func newHookCommand() *cli.Command {
+	return &cli.Command{
 		Name:        "hook",
 		Usage:       "(internal) Should only be called by Git",
+		Hidden:      true, // internal commands shouldn't be visible
 		Description: "Delegate commands to corresponding Git hooks",
 		Before:      PrepareConsoleLoggerLevel(log.FATAL),
-		Subcommands: []*cli.Command{
-			subcmdHookPreReceive,
-			subcmdHookUpdate,
-			subcmdHookPostReceive,
-			subcmdHookProcReceive,
+		Commands: []*cli.Command{
+			newHookPreReceiveCommand(),
+			newHookUpdateCommand(),
+			newHookPostReceiveCommand(),
+			newHookProcReceiveCommand(),
 		},
 	}
+}
 
-	subcmdHookPreReceive = &cli.Command{
+func newHookPreReceiveCommand() *cli.Command {
+	return &cli.Command{
 		Name:        "pre-receive",
 		Usage:       "Delegate pre-receive Git hook",
 		Description: "This command should only be called by Git",
@@ -53,7 +56,10 @@ var (
 			},
 		},
 	}
-	subcmdHookUpdate = &cli.Command{
+}
+
+func newHookUpdateCommand() *cli.Command {
+	return &cli.Command{
 		Name:        "update",
 		Usage:       "Delegate update Git hook",
 		Description: "This command should only be called by Git",
@@ -64,7 +70,10 @@ var (
 			},
 		},
 	}
-	subcmdHookPostReceive = &cli.Command{
+}
+
+func newHookPostReceiveCommand() *cli.Command {
+	return &cli.Command{
 		Name:        "post-receive",
 		Usage:       "Delegate post-receive Git hook",
 		Description: "This command should only be called by Git",
@@ -75,8 +84,11 @@ var (
 			},
 		},
 	}
-	// Note: new hook since git 2.29
-	subcmdHookProcReceive = &cli.Command{
+}
+
+// Note: new hook since git 2.29
+func newHookProcReceiveCommand() *cli.Command {
+	return &cli.Command{
 		Name:        "proc-receive",
 		Usage:       "Delegate proc-receive Git hook",
 		Description: "This command should only be called by Git",
@@ -87,7 +99,7 @@ var (
 			},
 		},
 	}
-)
+}
 
 type delayWriter struct {
 	internal io.Writer
@@ -139,9 +151,6 @@ func (d *delayWriter) WriteString(s string) (n int, err error) {
 }
 
 func (d *delayWriter) Close() error {
-	if d == nil {
-		return nil
-	}
 	stopped := d.timer.Stop()
 	if stopped || d.buf == nil {
 		return nil
@@ -151,22 +160,18 @@ func (d *delayWriter) Close() error {
 	return err
 }
 
-type nilWriter struct{}
-
-func (n *nilWriter) Write(p []byte) (int, error) {
-	return len(p), nil
+func parseGitHookCommitRefLine(line string) (oldCommitID, newCommitID string, refFullName git.RefName, ok bool) {
+	fields := strings.Split(line, " ")
+	if len(fields) != 3 {
+		return "", "", "", false
+	}
+	return fields[0], fields[1], git.RefName(fields[2]), true
 }
 
-func (n *nilWriter) WriteString(s string) (int, error) {
-	return len(s), nil
-}
-
-func runHookPreReceive(c *cli.Context) error {
+func runHookPreReceive(ctx context.Context, c *cli.Command) error {
 	if isInternal, _ := strconv.ParseBool(os.Getenv(repo_module.EnvIsInternal)); isInternal {
 		return nil
 	}
-	ctx, cancel := installSignals()
-	defer cancel()
 
 	setup(ctx, c.Bool("debug"))
 
@@ -186,7 +191,7 @@ Gitea or set your environment appropriately.`, "")
 	userID, _ := strconv.ParseInt(os.Getenv(repo_module.EnvPusherID), 10, 64)
 	prID, _ := strconv.ParseInt(os.Getenv(repo_module.EnvPRID), 10, 64)
 	deployKeyID, _ := strconv.ParseInt(os.Getenv(repo_module.EnvDeployKeyID), 10, 64)
-	actionPerm, _ := strconv.ParseInt(os.Getenv(repo_module.EnvActionPerm), 10, 64)
+	actionsTaskID, _ := strconv.ParseInt(os.Getenv(repo_module.EnvActionsTaskID), 10, 64)
 
 	hookOptions := private.HookOptions{
 		UserID:                          userID,
@@ -196,7 +201,8 @@ Gitea or set your environment appropriately.`, "")
 		GitPushOptions:                  pushOptions(),
 		PullRequestID:                   prID,
 		DeployKeyID:                     deployKeyID,
-		ActionPerm:                      int(actionPerm),
+		ActionsTaskID:                   actionsTaskID,
+		IsWiki:                          isWiki,
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -208,8 +214,7 @@ Gitea or set your environment appropriately.`, "")
 	total := 0
 	lastline := 0
 
-	var out io.Writer
-	out = &nilWriter{}
+	out := io.Discard
 	if setting.Git.VerbosePush {
 		if setting.Git.VerbosePushDelay > 0 {
 			dWriter := newDelayWriter(os.Stdout, setting.Git.VerbosePushDelay)
@@ -228,14 +233,11 @@ Gitea or set your environment appropriately.`, "")
 			continue
 		}
 
-		fields := bytes.Fields(scanner.Bytes())
-		if len(fields) != 3 {
+		oldCommitID, newCommitID, refFullName, ok := parseGitHookCommitRefLine(scanner.Text())
+		if !ok {
 			continue
 		}
 
-		oldCommitID := string(fields[0])
-		newCommitID := string(fields[1])
-		refFullName := git.RefName(fields[2])
 		total++
 		lastline++
 
@@ -270,6 +272,9 @@ Gitea or set your environment appropriately.`, "")
 			lastline = 0
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return fail(ctx, "Hook failed: stdin read error", "scanner error: %v", err)
+	}
 
 	if count > 0 {
 		hookOptions.OldCommitIDs = oldCommitIDs[:count]
@@ -290,20 +295,31 @@ Gitea or set your environment appropriately.`, "")
 	return nil
 }
 
-func runHookUpdate(c *cli.Context) error {
+// runHookUpdate avoid to do heavy operations on update hook because it will be
+// invoked for every ref update which does not like pre-receive and post-receive
+func runHookUpdate(_ context.Context, c *cli.Command) error {
+	if isInternal, _ := strconv.ParseBool(os.Getenv(repo_module.EnvIsInternal)); isInternal {
+		return nil
+	}
+
 	// Update is empty and is kept only for backwards compatibility
+	if len(os.Args) < 3 {
+		return nil
+	}
+	refName := git.RefName(os.Args[len(os.Args)-3])
+	if refName.IsPull() {
+		// ignore update to refs/pull/xxx/head, so we don't need to output any information
+		os.Exit(1)
+	}
 	return nil
 }
 
-func runHookPostReceive(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
-
+func runHookPostReceive(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
 
 	// First of all run update-server-info no matter what
-	if _, _, err := git.NewCommand(ctx, "update-server-info").RunStdString(nil); err != nil {
-		return fmt.Errorf("Failed to call 'git update-server-info': %w", err)
+	if err := gitcmd.NewCommand("update-server-info").RunWithStderr(ctx); err != nil {
+		return fmt.Errorf("failed to call 'git update-server-info': %w", err)
 	}
 
 	// Now if we're an internal don't do anything else
@@ -320,12 +336,10 @@ Gitea or set your environment appropriately.`, "")
 		return nil
 	}
 
-	var out io.Writer
-	var dWriter *delayWriter
-	out = &nilWriter{}
+	out := io.Discard
 	if setting.Git.VerbosePush {
 		if setting.Git.VerbosePushDelay > 0 {
-			dWriter = newDelayWriter(os.Stdout, setting.Git.VerbosePushDelay)
+			dWriter := newDelayWriter(os.Stdout, setting.Git.VerbosePushDelay)
 			defer dWriter.Close()
 			out = dWriter
 		} else {
@@ -350,100 +364,64 @@ Gitea or set your environment appropriately.`, "")
 		GitPushOptions:                  pushOptions(),
 		PullRequestID:                   prID,
 		PushTrigger:                     repo_module.PushTrigger(os.Getenv(repo_module.EnvPushTrigger)),
+		IsWiki:                          isWiki,
 	}
-	oldCommitIDs := make([]string, hookBatchSize)
-	newCommitIDs := make([]string, hookBatchSize)
-	refFullNames := make([]git.RefName, hookBatchSize)
-	count := 0
-	total := 0
-	wasEmpty := false
-	masterPushed := false
+
+	oldCommitIDs := make([]string, 0, hookBatchSize)
+	newCommitIDs := make([]string, 0, hookBatchSize)
+	refFullNames := make([]git.RefName, 0, hookBatchSize)
 	results := make([]private.HookPostReceiveBranchResult, 0)
+
+	defer func() {
+		hookPrintResults(results)
+	}()
+
+	processBatch := func() error {
+		if len(refFullNames) == 0 {
+			return nil
+		}
+		_, _ = fmt.Fprintf(out, " Processing %d references\n", len(refFullNames))
+		hookOptions.OldCommitIDs = oldCommitIDs
+		hookOptions.NewCommitIDs = newCommitIDs
+		hookOptions.RefFullNames = refFullNames
+		resp, extra := private.HookPostReceive(ctx, repoUser, repoName, hookOptions)
+		if extra.HasError() {
+			return fail(ctx, extra.UserMsg, "HookPostReceive failed: %v", extra.Error)
+		}
+		results = append(results, resp.Results...)
+		oldCommitIDs = oldCommitIDs[:0]
+		newCommitIDs = newCommitIDs[:0]
+		refFullNames = refFullNames[:0]
+		return nil
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		// TODO: support news feeds for wiki
+		// wiki doesn't need "post-receive" at the moment
 		if isWiki {
 			continue
 		}
 
-		fields := bytes.Fields(scanner.Bytes())
-		if len(fields) != 3 {
+		oldCommitID, newCommitID, refFullName, ok := parseGitHookCommitRefLine(scanner.Text())
+		if !ok {
 			continue
 		}
+		_, _ = fmt.Fprintf(out, ".")
 
-		fmt.Fprintf(out, ".")
-		oldCommitIDs[count] = string(fields[0])
-		newCommitIDs[count] = string(fields[1])
-		refFullNames[count] = git.RefName(fields[2])
-
-		commitID, _ := git.NewIDFromString(newCommitIDs[count])
-		if refFullNames[count] == git.BranchPrefix+"master" && !commitID.IsZero() && count == total {
-			masterPushed = true
-		}
-		count++
-		total++
-
-		if count >= hookBatchSize {
-			fmt.Fprintf(out, " Processing %d references\n", count)
-			hookOptions.OldCommitIDs = oldCommitIDs
-			hookOptions.NewCommitIDs = newCommitIDs
-			hookOptions.RefFullNames = refFullNames
-			resp, extra := private.HookPostReceive(ctx, repoUser, repoName, hookOptions)
-			if extra.HasError() {
-				_ = dWriter.Close()
-				hookPrintResults(results)
-				return fail(ctx, extra.UserMsg, "HookPostReceive failed: %v", extra.Error)
-			}
-			wasEmpty = wasEmpty || resp.RepoWasEmpty
-			results = append(results, resp.Results...)
-			count = 0
-		}
-	}
-
-	if count == 0 {
-		if wasEmpty && masterPushed {
-			// We need to tell the repo to reset the default branch to master
-			extra := private.SetDefaultBranch(ctx, repoUser, repoName, "master")
-			if extra.HasError() {
-				return fail(ctx, extra.UserMsg, "SetDefaultBranch failed: %v", extra.Error)
+		oldCommitIDs = append(oldCommitIDs, oldCommitID)
+		newCommitIDs = append(newCommitIDs, newCommitID)
+		refFullNames = append(refFullNames, refFullName)
+		if len(refFullNames) >= hookBatchSize {
+			// process and start a new batch
+			if err := processBatch(); err != nil {
+				return err
 			}
 		}
-		fmt.Fprintf(out, "Processed %d references in total\n", total)
-
-		_ = dWriter.Close()
-		hookPrintResults(results)
-		return nil
 	}
-
-	hookOptions.OldCommitIDs = oldCommitIDs[:count]
-	hookOptions.NewCommitIDs = newCommitIDs[:count]
-	hookOptions.RefFullNames = refFullNames[:count]
-
-	fmt.Fprintf(out, " Processing %d references\n", count)
-
-	resp, extra := private.HookPostReceive(ctx, repoUser, repoName, hookOptions)
-	if resp == nil {
-		_ = dWriter.Close()
-		hookPrintResults(results)
-		return fail(ctx, extra.UserMsg, "HookPostReceive failed: %v", extra.Error)
+	if err := scanner.Err(); err != nil {
+		return fail(ctx, "Hook failed: stdin read error", "scanner error: %v", err)
 	}
-	wasEmpty = wasEmpty || resp.RepoWasEmpty
-	results = append(results, resp.Results...)
-
-	fmt.Fprintf(out, "Processed %d references in total\n", total)
-
-	if wasEmpty && masterPushed {
-		// We need to tell the repo to reset the default branch to master
-		extra := private.SetDefaultBranch(ctx, repoUser, repoName, "master")
-		if extra.HasError() {
-			return fail(ctx, extra.UserMsg, "SetDefaultBranch failed: %v", extra.Error)
-		}
-	}
-	_ = dWriter.Close()
-	hookPrintResults(results)
-
-	return nil
+	return processBatch()
 }
 
 func hookPrintResults(results []private.HookPostReceiveBranchResult) {
@@ -471,7 +449,7 @@ func hookPrintResult(output, isCreate bool, branch, url string) {
 func pushOptions() map[string]string {
 	opts := make(map[string]string)
 	if pushCount, err := strconv.Atoi(os.Getenv(private.GitPushOptionCount)); err == nil {
-		for idx := 0; idx < pushCount; idx++ {
+		for idx := range pushCount {
 			opt := os.Getenv(fmt.Sprintf("GIT_PUSH_OPTION_%d", idx))
 			kv := strings.SplitN(opt, "=", 2)
 			if len(kv) == 2 {
@@ -482,10 +460,7 @@ func pushOptions() map[string]string {
 	return opts
 }
 
-func runHookProcReceive(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
-
+func runHookProcReceive(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
 
 	if len(os.Getenv("SSH_ORIGINAL_COMMAND")) == 0 {
@@ -503,6 +478,7 @@ Gitea or set your environment appropriately.`, "")
 
 	reader := bufio.NewReader(os.Stdin)
 	repoUser := os.Getenv(repo_module.EnvRepoUsername)
+	isWiki, _ := strconv.ParseBool(os.Getenv(repo_module.EnvRepoIsWiki))
 	repoName := os.Getenv(repo_module.EnvRepoName)
 	pusherID, _ := strconv.ParseInt(os.Getenv(repo_module.EnvPusherID), 10, 64)
 	pusherName := os.Getenv(repo_module.EnvPusherName)
@@ -528,14 +504,14 @@ Gitea or set your environment appropriately.`, "")
 
 	index := bytes.IndexByte(rs.Data, byte(0))
 	if index >= len(rs.Data) {
-		return fail(ctx, "Protocol: format error", "pkt-line: format error "+fmt.Sprint(rs.Data))
+		return fail(ctx, "Protocol: format error", "pkt-line: format error %s", rs.Data)
 	}
 
 	if index < 0 {
 		if len(rs.Data) == 10 && rs.Data[9] == '\n' {
 			index = 9
 		} else {
-			return fail(ctx, "Protocol: format error", "pkt-line: format error "+fmt.Sprint(rs.Data))
+			return fail(ctx, "Protocol: format error", "pkt-line: format error %s", rs.Data)
 		}
 	}
 
@@ -577,16 +553,18 @@ Gitea or set your environment appropriately.`, "")
 	// S: ... ...
 	// S: flush-pkt
 	hookOptions := private.HookOptions{
-		UserName: pusherName,
-		UserID:   pusherID,
+		UserName:       pusherName,
+		UserID:         pusherID,
+		GitPushOptions: make(map[string]string),
+		IsWiki:         isWiki,
 	}
 	hookOptions.OldCommitIDs = make([]string, 0, hookBatchSize)
 	hookOptions.NewCommitIDs = make([]string, 0, hookBatchSize)
 	hookOptions.RefFullNames = make([]git.RefName, 0, hookBatchSize)
 
 	for {
-		// note: pktLineTypeUnknow means pktLineTypeFlush and pktLineTypeData all allowed
-		rs, err = readPktLine(ctx, reader, pktLineTypeUnknow)
+		// note: pktLineTypeUnknown means pktLineTypeFlush and pktLineTypeData all allowed
+		rs, err = readPktLine(ctx, reader, pktLineTypeUnknown)
 		if err != nil {
 			return err
 		}
@@ -603,11 +581,9 @@ Gitea or set your environment appropriately.`, "")
 		hookOptions.RefFullNames = append(hookOptions.RefFullNames, git.RefName(t[2]))
 	}
 
-	hookOptions.GitPushOptions = make(map[string]string)
-
 	if hasPushOptions {
 		for {
-			rs, err = readPktLine(ctx, reader, pktLineTypeUnknow)
+			rs, err = readPktLine(ctx, reader, pktLineTypeUnknown)
 			if err != nil {
 				return err
 			}
@@ -615,11 +591,7 @@ Gitea or set your environment appropriately.`, "")
 			if rs.Type == pktLineTypeFlush {
 				break
 			}
-
-			kv := strings.SplitN(string(rs.Data), "=", 2)
-			if len(kv) == 2 {
-				hookOptions.GitPushOptions[kv[0]] = kv[1]
-			}
+			hookOptions.GitPushOptions.AddFromKeyValue(string(rs.Data))
 		}
 	}
 
@@ -708,8 +680,8 @@ Gitea or set your environment appropriately.`, "")
 type pktLineType int64
 
 const (
-	// UnKnow type
-	pktLineTypeUnknow pktLineType = 0
+	// Unknown type
+	pktLineTypeUnknown pktLineType = 0
 	// flush-pkt "0000"
 	pktLineTypeFlush pktLineType = iota
 	// data line
@@ -731,7 +703,7 @@ func readPktLine(ctx context.Context, in *bufio.Reader, requestType pktLineType)
 
 	// read prefix
 	lengthBytes := make([]byte, 4)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		lengthBytes[i], err = in.ReadByte()
 		if err != nil {
 			return nil, fail(ctx, "Protocol: stdin error", "Pkt-Line: read stdin failed : %v", err)

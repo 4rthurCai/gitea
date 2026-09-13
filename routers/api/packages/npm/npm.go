@@ -12,19 +12,19 @@ import (
 	"net/http"
 	"strings"
 
-	"code.gitea.io/gitea/models/db"
-	packages_model "code.gitea.io/gitea/models/packages"
-	access_model "code.gitea.io/gitea/models/perm/access"
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/models/unit"
-	"code.gitea.io/gitea/modules/optional"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	npm_module "code.gitea.io/gitea/modules/packages/npm"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/routers/api/packages/helper"
-	"code.gitea.io/gitea/services/context"
-	packages_service "code.gitea.io/gitea/services/packages"
+	"gitea.dev/models/db"
+	packages_model "gitea.dev/models/packages"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unit"
+	"gitea.dev/modules/optional"
+	packages_module "gitea.dev/modules/packages"
+	npm_module "gitea.dev/modules/packages/npm"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
+	"gitea.dev/routers/api/packages/helper"
+	"gitea.dev/services/context"
+	packages_service "gitea.dev/services/packages"
 
 	"github.com/hashicorp/go-version"
 )
@@ -33,18 +33,17 @@ import (
 var errInvalidTagName = errors.New("The tag name is invalid")
 
 func apiError(ctx *context.Context, status int, obj any) {
-	helper.LogAndProcessError(ctx, status, obj, func(message string) {
-		ctx.JSON(status, map[string]string{
-			"error": message,
-		})
+	message := helper.ProcessErrorForUser(ctx, status, obj)
+	ctx.JSON(status, map[string]string{
+		"error": message,
 	})
 }
 
 // packageNameFromParams gets the package name from the url parameters
 // Variations: /name/, /@scope/name/, /@scope%2Fname/
 func packageNameFromParams(ctx *context.Context) string {
-	scope := ctx.Params("scope")
-	id := ctx.Params("id")
+	scope := ctx.PathParam("scope")
+	id := ctx.PathParam("id")
 	if scope != "" {
 		return fmt.Sprintf("@%s/%s", scope, id)
 	}
@@ -82,10 +81,10 @@ func PackageMetadata(ctx *context.Context) {
 // DownloadPackageFile serves the content of a package
 func DownloadPackageFile(ctx *context.Context) {
 	packageName := packageNameFromParams(ctx)
-	packageVersion := ctx.Params("version")
-	filename := ctx.Params("filename")
+	packageVersion := ctx.PathParam("version")
+	filename := ctx.PathParam("filename")
 
-	s, u, pf, err := packages_service.GetFileStreamByPackageNameAndVersion(
+	s, u, pf, err := packages_service.OpenFileForDownloadByPackageNameAndVersion(
 		ctx,
 		&packages_service.PackageInfo{
 			Owner:       ctx.Package.Owner,
@@ -96,9 +95,10 @@ func DownloadPackageFile(ctx *context.Context) {
 		&packages_service.PackageFileInfo{
 			Filename: filename,
 		},
+		ctx.Req.Method,
 	)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist || err == packages_model.ErrPackageFileNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) || errors.Is(err, packages_model.ErrPackageFileNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -111,7 +111,7 @@ func DownloadPackageFile(ctx *context.Context) {
 
 // DownloadPackageFileByName finds the version and serves the contents of a package
 func DownloadPackageFileByName(ctx *context.Context) {
-	filename := ctx.Params("filename")
+	filename := ctx.PathParam("filename")
 
 	pvs, _, err := packages_model.SearchVersions(ctx, &packages_model.PackageSearchOptions{
 		OwnerID: ctx.Package.Owner.ID,
@@ -132,15 +132,16 @@ func DownloadPackageFileByName(ctx *context.Context) {
 		return
 	}
 
-	s, u, pf, err := packages_service.GetFileStreamByPackageVersion(
+	s, u, pf, err := packages_service.OpenFileForDownloadByPackageVersion(
 		ctx,
 		pvs[0],
 		&packages_service.PackageFileInfo{
 			Filename: filename,
 		},
+		ctx.Req.Method,
 	)
 	if err != nil {
-		if err == packages_model.ErrPackageFileNotExist {
+		if errors.Is(err, packages_model.ErrPackageFileNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -163,12 +164,12 @@ func UploadPackage(ctx *context.Context) {
 		return
 	}
 
-	repo, err := repo_model.GetRepositoryByURL(ctx, npmPackage.Metadata.Repository.URL)
+	repo, err := repo_model.GetRepositoryByURLRelax(ctx, npmPackage.Metadata.Repository.URL)
 	if err == nil {
 		canWrite := repo.OwnerID == ctx.Doer.ID
 
 		if !canWrite {
-			perms, err := access_model.GetUserRepoPermission(ctx, repo, ctx.Doer)
+			perms, err := access_model.GetDoerRepoPermission(ctx, repo, ctx.Doer)
 			if err != nil {
 				apiError(ctx, http.StatusInternalServerError, err)
 				return
@@ -254,7 +255,7 @@ func DeletePreview(ctx *context.Context) {
 // DeletePackageVersion deletes the package version
 func DeletePackageVersion(ctx *context.Context) {
 	packageName := packageNameFromParams(ctx)
-	packageVersion := ctx.Params("version")
+	packageVersion := ctx.PathParam("version")
 
 	err := packages_service.RemovePackageVersionByNameAndVersion(
 		ctx,
@@ -267,7 +268,7 @@ func DeletePackageVersion(ctx *context.Context) {
 		},
 	)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -332,16 +333,23 @@ func ListPackageTags(ctx *context.Context) {
 func AddPackageTag(ctx *context.Context) {
 	packageName := packageNameFromParams(ctx)
 
-	body, err := io.ReadAll(ctx.Req.Body)
+	// the dist-tag body is only a quoted version string; bound it to avoid an unbounded
+	// read that could exhaust memory
+	const maxDistTagBodySize = 4 * 1024
+	body, err := io.ReadAll(io.LimitReader(ctx.Req.Body, maxDistTagBodySize+1))
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
+		return
+	}
+	if len(body) > maxDistTagBodySize {
+		apiError(ctx, http.StatusRequestEntityTooLarge, errors.New("request body too large"))
 		return
 	}
 	version := strings.Trim(string(body), "\"") // is as "version" in the body
 
 	pv, err := packages_model.GetVersionByNameAndVersion(ctx, ctx.Package.Owner.ID, packages_model.TypeNpm, packageName, version)
 	if err != nil {
-		if err == packages_model.ErrPackageNotExist {
+		if errors.Is(err, packages_model.ErrPackageNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
 			return
 		}
@@ -349,7 +357,7 @@ func AddPackageTag(ctx *context.Context) {
 		return
 	}
 
-	if err := setPackageTag(ctx, ctx.Params("tag"), pv, false); err != nil {
+	if err := setPackageTag(ctx, ctx.PathParam("tag"), pv, false); err != nil {
 		if err == errInvalidTagName {
 			apiError(ctx, http.StatusBadRequest, err)
 			return
@@ -370,7 +378,7 @@ func DeletePackageTag(ctx *context.Context) {
 	}
 
 	if len(pvs) != 0 {
-		if err := setPackageTag(ctx, ctx.Params("tag"), pvs[0], true); err != nil {
+		if err := setPackageTag(ctx, ctx.PathParam("tag"), pvs[0], true); err != nil {
 			if err == errInvalidTagName {
 				apiError(ctx, http.StatusBadRequest, err)
 				return

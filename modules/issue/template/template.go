@@ -4,14 +4,16 @@
 package template
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
-	"code.gitea.io/gitea/modules/container"
-	api "code.gitea.io/gitea/modules/structs"
+	"gitea.dev/modules/container"
+	api "gitea.dev/modules/structs"
 
 	"gitea.com/go-chi/binding"
 )
@@ -31,17 +33,17 @@ func Validate(template *api.IssueTemplate) error {
 
 func validateMetadata(template *api.IssueTemplate) error {
 	if strings.TrimSpace(template.Name) == "" {
-		return fmt.Errorf("'name' is required")
+		return errors.New("'name' is required")
 	}
 	if strings.TrimSpace(template.About) == "" {
-		return fmt.Errorf("'about' is required")
+		return errors.New("'about' is required")
 	}
 	return nil
 }
 
 func validateYaml(template *api.IssueTemplate) error {
 	if len(template.Fields) == 0 {
-		return fmt.Errorf("'body' is required")
+		return errors.New("'body' is required")
 	}
 	ids := make(container.Set[string])
 	for idx, field := range template.Fields {
@@ -86,6 +88,9 @@ func validateYaml(template *api.IssueTemplate) error {
 				return err
 			}
 			if err := validateBoolItem(position, field.Attributes, "multiple"); err != nil {
+				return err
+			}
+			if err := validateBoolItem(position, field.Attributes, "list"); err != nil {
 				return err
 			}
 			if err := validateOptions(field, idx); err != nil {
@@ -340,7 +345,13 @@ func (f *valuedField) WriteTo(builder *strings.Builder) {
 			}
 		}
 		if len(checkeds) > 0 {
-			_, _ = fmt.Fprintf(builder, "%s\n", strings.Join(checkeds, ", "))
+			if list, ok := f.Attributes["list"].(bool); ok && list {
+				for _, check := range checkeds {
+					_, _ = fmt.Fprintf(builder, "- %s\n", check)
+				}
+			} else {
+				_, _ = fmt.Fprintf(builder, "%s\n", strings.Join(checkeds, ", "))
+			}
 		} else {
 			_, _ = fmt.Fprint(builder, blankPlaceholder)
 		}
@@ -392,7 +403,7 @@ func (f *valuedField) Render() string {
 }
 
 func (f *valuedField) Value() string {
-	return strings.TrimSpace(f.Get(fmt.Sprintf("form-field-" + f.ID)))
+	return strings.TrimSpace(f.Get("form-field-" + f.ID))
 }
 
 func (f *valuedField) Options() []*valuedOption {
@@ -435,14 +446,9 @@ func (o *valuedOption) Label() string {
 func (o *valuedOption) IsChecked() bool {
 	switch o.field.Type {
 	case api.IssueFormFieldTypeDropdown:
-		checks := strings.Split(o.field.Get(fmt.Sprintf("form-field-%s", o.field.ID)), ",")
+		checks := strings.Split(o.field.Get("form-field-"+o.field.ID), ",")
 		idx := strconv.Itoa(o.index)
-		for _, v := range checks {
-			if v == idx {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(checks, idx)
 	case api.IssueFormFieldTypeCheckboxes:
 		return o.field.Get(fmt.Sprintf("form-field-%s-%d", o.field.ID, o.index)) == "on"
 	}

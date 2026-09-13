@@ -6,13 +6,15 @@ package notify
 import (
 	"context"
 
-	issues_model "code.gitea.io/gitea/models/issues"
-	packages_model "code.gitea.io/gitea/models/packages"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/repository"
+	actions_model "gitea.dev/models/actions"
+	git_model "gitea.dev/models/git"
+	issues_model "gitea.dev/models/issues"
+	packages_model "gitea.dev/models/packages"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/repository"
 )
 
 var notifiers []Notifier
@@ -44,10 +46,25 @@ func DeleteWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model
 	}
 }
 
+func shouldSendCommentChangeNotification(ctx context.Context, comment *issues_model.Comment) bool {
+	if err := comment.LoadReview(ctx); err != nil {
+		log.Error("LoadReview: %v", err)
+		return false
+	} else if comment.Review != nil && comment.Review.Type == issues_model.ReviewTypePending {
+		// Pending review comments updating should not triggered
+		return false
+	}
+	return true
+}
+
 // CreateIssueComment notifies issue comment related message to notifiers
 func CreateIssueComment(ctx context.Context, doer *user_model.User, repo *repo_model.Repository,
 	issue *issues_model.Issue, comment *issues_model.Comment, mentions []*user_model.User,
 ) {
+	if !shouldSendCommentChangeNotification(ctx, comment) {
+		return
+	}
+
 	for _, notifier := range notifiers {
 		notifier.CreateIssueComment(ctx, doer, repo, issue, comment, mentions)
 	}
@@ -103,9 +120,9 @@ func NewPullRequest(ctx context.Context, pr *issues_model.PullRequest, mentions 
 }
 
 // PullRequestSynchronized notifies Synchronized pull request
-func PullRequestSynchronized(ctx context.Context, doer *user_model.User, pr *issues_model.PullRequest) {
+func PullRequestSynchronized(ctx context.Context, doer *user_model.User, pr *issues_model.PullRequest, before, after string) {
 	for _, notifier := range notifiers {
-		notifier.PullRequestSynchronized(ctx, doer, pr)
+		notifier.PullRequestSynchronized(ctx, doer, pr, before, after)
 	}
 }
 
@@ -154,6 +171,10 @@ func PullReviewDismiss(ctx context.Context, doer *user_model.User, review *issue
 
 // UpdateComment notifies update comment to notifiers
 func UpdateComment(ctx context.Context, doer *user_model.User, c *issues_model.Comment, oldContent string) {
+	if !shouldSendCommentChangeNotification(ctx, c) {
+		return
+	}
+
 	for _, notifier := range notifiers {
 		notifier.UpdateComment(ctx, doer, c, oldContent)
 	}
@@ -161,6 +182,10 @@ func UpdateComment(ctx context.Context, doer *user_model.User, c *issues_model.C
 
 // DeleteComment notifies delete comment to notifiers
 func DeleteComment(ctx context.Context, doer *user_model.User, c *issues_model.Comment) {
+	if !shouldSendCommentChangeNotification(ctx, c) {
+		return
+	}
+
 	for _, notifier := range notifiers {
 		notifier.DeleteComment(ctx, doer, c)
 	}
@@ -271,9 +296,9 @@ func MigrateRepository(ctx context.Context, doer, u *user_model.User, repo *repo
 }
 
 // TransferRepository notifies create repository to notifiers
-func TransferRepository(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, newOwnerName string) {
+func TransferRepository(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, oldOwnerName string) {
 	for _, notifier := range notifiers {
-		notifier.TransferRepository(ctx, doer, repo, newOwnerName)
+		notifier.TransferRepository(ctx, doer, repo, oldOwnerName)
 	}
 }
 
@@ -365,5 +390,29 @@ func PackageDelete(ctx context.Context, doer *user_model.User, pd *packages_mode
 func ChangeDefaultBranch(ctx context.Context, repo *repo_model.Repository) {
 	for _, notifier := range notifiers {
 		notifier.ChangeDefaultBranch(ctx, repo)
+	}
+}
+
+func CreateCommitStatus(ctx context.Context, repo *repo_model.Repository, commit *repository.PushCommit, sender *user_model.User, status *git_model.CommitStatus) {
+	for _, notifier := range notifiers {
+		notifier.CreateCommitStatus(ctx, repo, commit, sender, status)
+	}
+}
+
+// WorkflowRunStatusUpdate dispatches a workflow run status change to every registered notifier.
+// Prefer the helpers in services/actions/notify.go over calling this directly;
+// unless you are sure the caller has already resolved the correct sender and paired notifications.
+func WorkflowRunStatusUpdate(ctx context.Context, repo *repo_model.Repository, sender *user_model.User, run *actions_model.ActionRun) {
+	for _, notifier := range notifiers {
+		notifier.WorkflowRunStatusUpdate(ctx, repo, sender, run)
+	}
+}
+
+// WorkflowJobStatusUpdate dispatches a workflow job status change to every registered notifier.
+// Prefer the helpers in services/actions/notify.go over calling this directly;
+// unless you are sure the caller has already resolved the correct sender and paired notifications.
+func WorkflowJobStatusUpdate(ctx context.Context, repo *repo_model.Repository, sender *user_model.User, job *actions_model.ActionRunJob, task *actions_model.ActionTask) {
+	for _, notifier := range notifiers {
+		notifier.WorkflowJobStatusUpdate(ctx, repo, sender, job, task)
 	}
 }

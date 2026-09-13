@@ -6,18 +6,20 @@ package setting
 
 import (
 	"net/http"
+	"strings"
 
-	auth_model "code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/services/context"
-	"code.gitea.io/gitea/services/forms"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/templates"
+	"gitea.dev/modules/util"
+	"gitea.dev/modules/web"
+	"gitea.dev/services/context"
+	"gitea.dev/services/forms"
 )
 
 const (
-	tplSettingsApplications base.TplName = "user/settings/applications"
+	tplSettingsApplications templates.TplName = "user/settings/applications"
 )
 
 // Applications render manage access token page
@@ -33,21 +35,33 @@ func Applications(ctx *context.Context) {
 // ApplicationsPost response for add user's access token
 func ApplicationsPost(ctx *context.Context) {
 	form := web.GetForm(ctx).(*forms.NewAccessTokenForm)
-	ctx.Data["Title"] = ctx.Tr("settings")
+	ctx.Data["Title"] = ctx.Tr("settings_title")
 	ctx.Data["PageIsSettingsApplications"] = true
 
-	if ctx.HasError() {
-		loadApplicationsData(ctx)
-
-		ctx.HTML(http.StatusOK, tplSettingsApplications)
-		return
+	_ = ctx.Req.ParseForm()
+	var scopeNames []string
+	const accessTokenScopePrefix = "scope-"
+	for k, v := range ctx.Req.Form {
+		if strings.HasPrefix(k, accessTokenScopePrefix) {
+			scopeNames = append(scopeNames, v...)
+		}
 	}
 
-	scope, err := form.GetScope()
+	scope, err := auth_model.AccessTokenScope(strings.Join(scopeNames, ",")).Normalize()
 	if err != nil {
 		ctx.ServerError("GetScope", err)
 		return
 	}
+	if !scope.HasPermissionScope() {
+		ctx.Flash.Error(ctx.Tr("settings.at_least_one_permission"), true)
+	}
+
+	if ctx.HasError() {
+		loadApplicationsData(ctx)
+		ctx.HTML(http.StatusOK, tplSettingsApplications)
+		return
+	}
+
 	t := &auth_model.AccessToken{
 		UID:   ctx.Doer.ID,
 		Name:  form.Name,
@@ -63,6 +77,30 @@ func ApplicationsPost(ctx *context.Context) {
 		ctx.Flash.Error(ctx.Tr("settings.generate_token_name_duplicate", t.Name))
 		ctx.Redirect(setting.AppSubURL + "/user/settings/applications")
 		return
+	}
+
+	// a token-authenticated request must not mint a token with a broader scope than its own, nor
+	// drop the public-only restriction. Web routes accept basic-auth PATs/OAuth tokens too, so this
+	// must mirror the REST API guard in routers/api/v1/user/app.go.
+	if ctx.Data["IsApiToken"] == true {
+		apiTokenScope, ok := ctx.Data["ApiTokenScope"].(auth_model.AccessTokenScope)
+		if !ok {
+			ctx.HTTPError(http.StatusForbidden, "the authenticating token has no scope")
+			return
+		}
+		hasScope, err := apiTokenScope.CanCreateChildScope(t.Scope)
+		if err != nil {
+			ctx.ServerError("CanCreateChildScope", err)
+			return
+		}
+		if !hasScope {
+			ctx.HTTPError(http.StatusForbidden, "cannot create an access token with a broader scope than the authenticating token")
+			return
+		}
+		if t.Scope, err = t.Scope.EnforcePublicOnlyFrom(apiTokenScope); err != nil {
+			ctx.ServerError("EnforcePublicOnlyFrom", err)
+			return
+		}
 	}
 
 	if err := auth_model.NewAccessToken(ctx, t); err != nil {
@@ -96,7 +134,14 @@ func loadApplicationsData(ctx *context.Context) {
 	}
 	ctx.Data["Tokens"] = tokens
 	ctx.Data["EnableOAuth2"] = setting.OAuth2.Enabled
-	ctx.Data["IsAdmin"] = ctx.Doer.IsAdmin
+
+	// Handle specific ordered token categories for admin or non-admin users
+	tokenCategoryNames := auth_model.GetAccessTokenCategories()
+	if !ctx.Doer.IsAdmin {
+		tokenCategoryNames = util.SliceRemoveAll(tokenCategoryNames, "admin")
+	}
+	ctx.Data["TokenCategories"] = tokenCategoryNames
+
 	if setting.OAuth2.Enabled {
 		ctx.Data["Applications"], err = db.Find[auth_model.OAuth2Application](ctx, auth_model.FindOAuth2ApplicationsOptions{
 			OwnerID: ctx.Doer.ID,

@@ -6,16 +6,16 @@ package auth
 import (
 	"context"
 
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/timeutil"
+	"gitea.dev/modules/util"
 
 	"xorm.io/builder"
 )
 
 var ErrAuthTokenNotExist = util.NewNotExistErrorf("auth token does not exist")
 
-type AuthToken struct { //nolint:revive
+type AuthToken struct { //nolint:revive // export stutter
 	ID          string `xorm:"pk"`
 	TokenHash   string
 	UserID      int64              `xorm:"INDEX"`

@@ -8,23 +8,23 @@ import (
 	"errors"
 	"net/http"
 
-	"code.gitea.io/gitea/models"
-	activities_model "code.gitea.io/gitea/models/activities"
-	"code.gitea.io/gitea/models/organization"
-	"code.gitea.io/gitea/models/perm"
-	access_model "code.gitea.io/gitea/models/perm/access"
-	repo_model "code.gitea.io/gitea/models/repo"
-	unit_model "code.gitea.io/gitea/models/unit"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/log"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/routers/api/v1/user"
-	"code.gitea.io/gitea/routers/api/v1/utils"
-	"code.gitea.io/gitea/services/context"
-	"code.gitea.io/gitea/services/convert"
-	org_service "code.gitea.io/gitea/services/org"
-	repo_service "code.gitea.io/gitea/services/repository"
+	activities_model "gitea.dev/models/activities"
+	"gitea.dev/models/organization"
+	"gitea.dev/models/perm"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	unit_model "gitea.dev/models/unit"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/log"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/routers/api/v1/user"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	feed_service "gitea.dev/services/feed"
+	org_service "gitea.dev/services/org"
+	repo_service "gitea.dev/services/repository"
 )
 
 // ListTeams list all the teams of an organization
@@ -54,21 +54,28 @@ func ListTeams(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	teams, count, err := organization.SearchTeam(ctx, &organization.SearchTeamOptions{
-		ListOptions: utils.GetListOptions(ctx),
+	listOptions := utils.GetListOptions(ctx)
+	opts := &organization.SearchTeamOptions{
+		ListOptions: listOptions,
 		OrgID:       ctx.Org.Organization.ID,
-	})
+	}
+	if err := organization.ApplyTeamListFilter(ctx, ctx.Org.Organization.ID, ctx.Doer, ctx.IsSigned, opts); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	teams, count, err := organization.SearchTeam(ctx, opts)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "LoadTeams", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	apiTeams, err := convert.ToTeams(ctx, teams, false)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "ConvertToTeams", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
+	ctx.SetLinkHeader(count, listOptions.PageSize)
 	ctx.SetTotalCountHeader(count)
 	ctx.JSON(http.StatusOK, apiTeams)
 }
@@ -93,21 +100,23 @@ func ListUserTeams(ctx *context.APIContext) {
 	//   "200":
 	//     "$ref": "#/responses/TeamList"
 
+	listOptions := utils.GetListOptions(ctx)
 	teams, count, err := organization.SearchTeam(ctx, &organization.SearchTeamOptions{
-		ListOptions: utils.GetListOptions(ctx),
+		ListOptions: listOptions,
 		UserID:      ctx.Doer.ID,
 	})
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetUserTeams", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	apiTeams, err := convert.ToTeams(ctx, teams, true)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "ConvertToTeams", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
+	ctx.SetLinkHeader(count, listOptions.PageSize)
 	ctx.SetTotalCountHeader(count)
 	ctx.JSON(http.StatusOK, apiTeams)
 }
@@ -134,31 +143,23 @@ func GetTeam(ctx *context.APIContext) {
 
 	apiTeam, err := convert.ToTeam(ctx, ctx.Org.Team, true)
 	if err != nil {
-		ctx.InternalServerError(err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	ctx.JSON(http.StatusOK, apiTeam)
 }
 
-func attachTeamUnits(team *organization.Team, units []string) {
+func attachTeamUnits(team *organization.Team, defaultAccessMode perm.AccessMode, units []string) {
 	unitTypes, _ := unit_model.FindUnitTypes(units...)
 	team.Units = make([]*organization.TeamUnit, 0, len(units))
 	for _, tp := range unitTypes {
 		team.Units = append(team.Units, &organization.TeamUnit{
 			OrgID:      team.OrgID,
 			Type:       tp,
-			AccessMode: team.AccessMode,
+			AccessMode: defaultAccessMode,
 		})
 	}
-}
-
-func convertUnitsMap(unitsMap map[string]string) map[unit_model.Type]perm.AccessMode {
-	res := make(map[unit_model.Type]perm.AccessMode, len(unitsMap))
-	for unitKey, p := range unitsMap {
-		res[unit_model.TypeFromKey(unitKey)] = perm.ParseAccessMode(p)
-	}
-	return res
 }
 
 func attachTeamUnitsMap(team *organization.Team, unitsMap map[string]string) {
@@ -214,44 +215,43 @@ func CreateTeam(ctx *context.APIContext) {
 	//   "422":
 	//     "$ref": "#/responses/validationError"
 	form := web.GetForm(ctx).(*api.CreateTeamOption)
-	p := perm.ParseAccessMode(form.Permission)
-	if p < perm.AccessModeAdmin && len(form.UnitsMap) > 0 {
-		p = unit_model.MinUnitAccessMode(convertUnitsMap(form.UnitsMap))
-	}
+	teamPermission := perm.ParseAccessMode(string(form.Permission), perm.AccessModeNone, perm.AccessModeAdmin)
 	team := &organization.Team{
 		OrgID:                   ctx.Org.Organization.ID,
 		Name:                    form.Name,
 		Description:             form.Description,
 		IncludesAllRepositories: form.IncludesAllRepositories,
 		CanCreateOrgRepo:        form.CanCreateOrgRepo,
-		AccessMode:              p,
+		AccessMode:              teamPermission,
+		Visibility:              organization.NormalizeTeamVisibility(string(form.Visibility)),
 	}
 
 	if team.AccessMode < perm.AccessModeAdmin {
 		if len(form.UnitsMap) > 0 {
 			attachTeamUnitsMap(team, form.UnitsMap)
 		} else if len(form.Units) > 0 {
-			attachTeamUnits(team, form.Units)
+			unitPerm := perm.ParseAccessMode(string(form.Permission), perm.AccessModeRead, perm.AccessModeWrite)
+			attachTeamUnits(team, unitPerm, form.Units)
 		} else {
-			ctx.Error(http.StatusInternalServerError, "getTeamUnits", errors.New("units permission should not be empty"))
+			ctx.APIErrorInternal(errors.New("units permission should not be empty"))
 			return
 		}
 	} else {
 		attachAdminTeamUnits(team)
 	}
 
-	if err := models.NewTeam(ctx, team); err != nil {
+	if err := org_service.NewTeam(ctx, team); err != nil {
 		if organization.IsErrTeamAlreadyExist(err) {
-			ctx.Error(http.StatusUnprocessableEntity, "", err)
+			ctx.APIError(http.StatusUnprocessableEntity, err.Error())
 		} else {
-			ctx.Error(http.StatusInternalServerError, "NewTeam", err)
+			ctx.APIErrorInternal(err)
 		}
 		return
 	}
 
 	apiTeam, err := convert.ToTeam(ctx, team, true)
 	if err != nil {
-		ctx.InternalServerError(err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.JSON(http.StatusCreated, apiTeam)
@@ -285,7 +285,7 @@ func EditTeam(ctx *context.APIContext) {
 	form := web.GetForm(ctx).(*api.EditTeamOption)
 	team := ctx.Org.Team
 	if err := team.LoadUnits(ctx); err != nil {
-		ctx.InternalServerError(err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
@@ -301,18 +301,17 @@ func EditTeam(ctx *context.APIContext) {
 		team.Description = *form.Description
 	}
 
+	if form.Visibility != nil && !team.IsOwnerTeam() {
+		team.Visibility = organization.NormalizeTeamVisibility(string(*form.Visibility))
+	}
+
 	isAuthChanged := false
 	isIncludeAllChanged := false
 	if !team.IsOwnerTeam() && len(form.Permission) != 0 {
-		// Validate permission level.
-		p := perm.ParseAccessMode(form.Permission)
-		if p < perm.AccessModeAdmin && len(form.UnitsMap) > 0 {
-			p = unit_model.MinUnitAccessMode(convertUnitsMap(form.UnitsMap))
-		}
-
-		if team.AccessMode != p {
+		teamPermission := perm.ParseAccessMode(string(form.Permission), perm.AccessModeNone, perm.AccessModeAdmin)
+		if team.AccessMode != teamPermission {
 			isAuthChanged = true
-			team.AccessMode = p
+			team.AccessMode = teamPermission
 		}
 
 		if form.IncludesAllRepositories != nil {
@@ -325,20 +324,21 @@ func EditTeam(ctx *context.APIContext) {
 		if len(form.UnitsMap) > 0 {
 			attachTeamUnitsMap(team, form.UnitsMap)
 		} else if len(form.Units) > 0 {
-			attachTeamUnits(team, form.Units)
+			unitPerm := perm.ParseAccessMode(string(form.Permission), perm.AccessModeRead, perm.AccessModeWrite)
+			attachTeamUnits(team, unitPerm, form.Units)
 		}
 	} else {
 		attachAdminTeamUnits(team)
 	}
 
-	if err := models.UpdateTeam(ctx, team, isAuthChanged, isIncludeAllChanged); err != nil {
-		ctx.Error(http.StatusInternalServerError, "EditTeam", err)
+	if err := org_service.UpdateTeam(ctx, team, isAuthChanged, isIncludeAllChanged); err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	apiTeam, err := convert.ToTeam(ctx, team)
 	if err != nil {
-		ctx.InternalServerError(err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.JSON(http.StatusOK, apiTeam)
@@ -362,8 +362,8 @@ func DeleteTeam(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	if err := models.DeleteTeam(ctx, ctx.Org.Team); err != nil {
-		ctx.Error(http.StatusInternalServerError, "DeleteTeam", err)
+	if err := org_service.DeleteTeam(ctx, ctx.Org.Team); err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)
@@ -397,21 +397,13 @@ func GetTeamMembers(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	isMember, err := organization.IsOrganizationMember(ctx, ctx.Org.Team.OrgID, ctx.Doer.ID)
-	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "IsOrganizationMember", err)
-		return
-	} else if !isMember && !ctx.Doer.IsAdmin {
-		ctx.NotFound()
-		return
-	}
-
+	listOptions := utils.GetListOptions(ctx)
 	teamMembers, err := organization.GetTeamMembers(ctx, &organization.SearchMembersOptions{
-		ListOptions: utils.GetListOptions(ctx),
+		ListOptions: listOptions,
 		TeamID:      ctx.Org.Team.ID,
 	})
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetTeamMembers", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
@@ -420,6 +412,7 @@ func GetTeamMembers(ctx *context.APIContext) {
 		members[i] = convert.ToUser(ctx, member, ctx.Doer)
 	}
 
+	ctx.SetLinkHeader(int64(ctx.Org.Team.NumMembers), listOptions.PageSize)
 	ctx.SetTotalCountHeader(int64(ctx.Org.Team.NumMembers))
 	ctx.JSON(http.StatusOK, members)
 }
@@ -440,7 +433,7 @@ func GetTeamMember(ctx *context.APIContext) {
 	//   required: true
 	// - name: username
 	//   in: path
-	//   description: username of the member to list
+	//   description: username of the user whose data is to be listed
 	//   type: string
 	//   required: true
 	// responses:
@@ -449,17 +442,17 @@ func GetTeamMember(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	u := user.GetUserByParams(ctx)
+	u := user.GetContextUserByPathParam(ctx)
 	if ctx.Written() {
 		return
 	}
-	teamID := ctx.ParamsInt64("teamid")
+	teamID := ctx.PathParamInt64("teamid")
 	isTeamMember, err := organization.IsUserInTeams(ctx, u.ID, []int64{teamID})
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "IsUserInTeams", err)
+		ctx.APIErrorInternal(err)
 		return
 	} else if !isTeamMember {
-		ctx.NotFound()
+		ctx.APIErrorNotFound()
 		return
 	}
 	ctx.JSON(http.StatusOK, convert.ToUser(ctx, u, ctx.Doer))
@@ -481,7 +474,7 @@ func AddTeamMember(ctx *context.APIContext) {
 	//   required: true
 	// - name: username
 	//   in: path
-	//   description: username of the user to add
+	//   description: username of the user to add to a team
 	//   type: string
 	//   required: true
 	// responses:
@@ -492,15 +485,15 @@ func AddTeamMember(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	u := user.GetUserByParams(ctx)
+	u := user.GetContextUserByPathParam(ctx)
 	if ctx.Written() {
 		return
 	}
-	if err := models.AddTeamMember(ctx, ctx.Org.Team, u); err != nil {
+	if err := org_service.AddTeamMember(ctx, ctx.Org.Team, u); err != nil {
 		if errors.Is(err, user_model.ErrBlockedUser) {
-			ctx.Error(http.StatusForbidden, "AddTeamMember", err)
+			ctx.APIError(http.StatusForbidden, err.Error())
 		} else {
-			ctx.Error(http.StatusInternalServerError, "AddTeamMember", err)
+			ctx.APIErrorInternal(err)
 		}
 		return
 	}
@@ -523,7 +516,7 @@ func RemoveTeamMember(ctx *context.APIContext) {
 	//   required: true
 	// - name: username
 	//   in: path
-	//   description: username of the user to remove
+	//   description: username of the user to remove from a team
 	//   type: string
 	//   required: true
 	// responses:
@@ -532,13 +525,13 @@ func RemoveTeamMember(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	u := user.GetUserByParams(ctx)
+	u := user.GetContextUserByPathParam(ctx)
 	if ctx.Written() {
 		return
 	}
 
-	if err := models.RemoveTeamMember(ctx, ctx.Org.Team, u); err != nil {
-		ctx.Error(http.StatusInternalServerError, "RemoveTeamMember", err)
+	if err := org_service.RemoveTeamMember(ctx, ctx.Org.Team, u); err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)
@@ -573,24 +566,44 @@ func GetTeamRepos(ctx *context.APIContext) {
 	//     "$ref": "#/responses/notFound"
 
 	team := ctx.Org.Team
-	teamRepos, err := organization.GetTeamRepositories(ctx, &organization.SearchTeamRepoOptions{
-		ListOptions: utils.GetListOptions(ctx),
+	listOptions := utils.GetListOptions(ctx)
+	// A public-only token must not expose (or count) private repos, even when the
+	// doer owning the token otherwise has access to them, so filter them out at the
+	// query level to keep the returned page and the total-count header consistent.
+	searchOpts := &repo_model.SearchTeamRepoOptions{
+		ListOptions: listOptions,
 		TeamID:      team.ID,
-	})
+		PublicOnly:  ctx.PublicOnly,
+	}
+	teamRepos, err := repo_model.GetTeamRepositories(ctx, searchOpts)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetTeamRepos", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
-	repos := make([]*api.Repository, len(teamRepos))
-	for i, repo := range teamRepos {
-		permission, err := access_model.GetUserRepoPermission(ctx, repo, ctx.Doer)
+	count, err := repo_model.CountTeamRepositories(ctx, searchOpts)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	repos := make([]*api.Repository, 0, len(teamRepos))
+	for _, repo := range teamRepos {
+		permission, err := access_model.GetDoerRepoPermission(ctx, repo, ctx.Doer)
 		if err != nil {
-			ctx.Error(http.StatusInternalServerError, "GetTeamRepos", err)
+			ctx.APIErrorInternal(err)
 			return
 		}
-		repos[i] = convert.ToRepo(ctx, repo, permission)
+		// A team's repo list is reachable by non-team-members through the team's
+		// visibility tier, so never expose repos (incl. their names) the doer
+		// cannot access. This per-repo visibility trim can't be expressed in the
+		// SQL count above without regressing per-unit public access, so for such
+		// non-members the total-count header may be a small upper bound.
+		if !permission.HasAnyUnitAccessOrPublicAccess() {
+			continue
+		}
+		repos = append(repos, convert.ToRepo(ctx, repo, permission))
 	}
-	ctx.SetTotalCountHeader(int64(team.NumRepos))
+	ctx.SetLinkHeader(count, listOptions.PageSize)
+	ctx.SetTotalCountHeader(count)
 	ctx.JSON(http.StatusOK, repos)
 }
 
@@ -629,14 +642,26 @@ func GetTeamRepo(ctx *context.APIContext) {
 		return
 	}
 
-	if !organization.HasTeamRepo(ctx, ctx.Org.Team.OrgID, ctx.Org.Team.ID, repo.ID) {
-		ctx.NotFound()
+	// A public-only token must not confirm the existence of a private repo.
+	if !ctx.TokenCanAccessRepo(repo) {
+		ctx.APIErrorNotFound()
 		return
 	}
 
-	permission, err := access_model.GetUserRepoPermission(ctx, repo, ctx.Doer)
+	if !organization.HasTeamRepo(ctx, ctx.Org.Team.OrgID, ctx.Org.Team.ID, repo.ID) {
+		ctx.APIErrorNotFound()
+		return
+	}
+
+	permission, err := access_model.GetDoerRepoPermission(ctx, repo, ctx.Doer)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetTeamRepos", err)
+		ctx.APIErrorInternal(err)
+		return
+	}
+	// The team may be reachable by a non-team-member via its visibility tier;
+	// don't confirm the existence of a repo the doer cannot access.
+	if !permission.HasAnyUnitAccessOrPublicAccess() {
+		ctx.APIErrorNotFound()
 		return
 	}
 
@@ -645,16 +670,29 @@ func GetTeamRepo(ctx *context.APIContext) {
 
 // getRepositoryByParams get repository by a team's organization ID and repo name
 func getRepositoryByParams(ctx *context.APIContext) *repo_model.Repository {
-	repo, err := repo_model.GetRepositoryByName(ctx, ctx.Org.Team.OrgID, ctx.Params(":reponame"))
+	repo, err := repo_model.GetRepositoryByName(ctx, ctx.Org.Team.OrgID, ctx.PathParam("reponame"))
 	if err != nil {
 		if repo_model.IsErrRepoNotExist(err) {
-			ctx.NotFound()
+			ctx.APIErrorNotFound()
 		} else {
-			ctx.Error(http.StatusInternalServerError, "GetRepositoryByName", err)
+			ctx.APIErrorInternal(err)
 		}
 		return nil
 	}
 	return repo
+}
+
+func canChangeTeamRepository(ctx *context.APIContext) bool {
+	canChange, err := ctx.Org.Organization.CanChangeRepoTeamAccess(ctx, ctx.Doer)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return false
+	}
+	if !canChange {
+		ctx.APIError(http.StatusForbidden, "Must be an organization owner")
+		return false
+	}
+	return true
 }
 
 // AddTeamRepository api for adding a repository to a team
@@ -693,15 +731,18 @@ func AddTeamRepository(ctx *context.APIContext) {
 	if ctx.Written() {
 		return
 	}
-	if access, err := access_model.AccessLevel(ctx, ctx.Doer, repo); err != nil {
-		ctx.Error(http.StatusInternalServerError, "AccessLevel", err)
-		return
-	} else if access < perm.AccessModeAdmin {
-		ctx.Error(http.StatusForbidden, "", "Must have admin-level access to the repository")
+	if !canChangeTeamRepository(ctx) {
 		return
 	}
-	if err := org_service.TeamAddRepository(ctx, ctx.Org.Team, repo); err != nil {
-		ctx.Error(http.StatusInternalServerError, "TeamAddRepository", err)
+	if access, err := access_model.AccessLevel(ctx, ctx.Doer, repo); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	} else if access < perm.AccessModeAdmin {
+		ctx.APIError(http.StatusForbidden, "Must have admin-level access to the repository")
+		return
+	}
+	if err := repo_service.TeamAddRepository(ctx, ctx.Org.Team, repo); err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)
@@ -745,15 +786,18 @@ func RemoveTeamRepository(ctx *context.APIContext) {
 	if ctx.Written() {
 		return
 	}
+	if !canChangeTeamRepository(ctx) {
+		return
+	}
 	if access, err := access_model.AccessLevel(ctx, ctx.Doer, repo); err != nil {
-		ctx.Error(http.StatusInternalServerError, "AccessLevel", err)
+		ctx.APIErrorInternal(err)
 		return
 	} else if access < perm.AccessModeAdmin {
-		ctx.Error(http.StatusForbidden, "", "Must have admin-level access to the repository")
+		ctx.APIError(http.StatusForbidden, "Must have admin-level access to the repository")
 		return
 	}
 	if err := repo_service.RemoveRepositoryFromTeam(ctx, ctx.Org.Team, repo.ID); err != nil {
-		ctx.Error(http.StatusInternalServerError, "RemoveRepository", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)
@@ -812,9 +856,9 @@ func SearchTeam(ctx *context.APIContext) {
 		ListOptions: listOptions,
 	}
 
-	// Only admin is allowd to search for all teams
-	if !ctx.Doer.IsAdmin {
-		opts.UserID = ctx.Doer.ID
+	if err := organization.ApplyTeamListFilter(ctx, ctx.Org.Organization.ID, ctx.Doer, ctx.IsSigned, opts); err != nil {
+		ctx.APIErrorInternal(err)
+		return
 	}
 
 	teams, maxResults, err := organization.SearchTeam(ctx, opts)
@@ -829,11 +873,11 @@ func SearchTeam(ctx *context.APIContext) {
 
 	apiTeams, err := convert.ToTeams(ctx, teams, false)
 	if err != nil {
-		ctx.InternalServerError(err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
-	ctx.SetLinkHeader(int(maxResults), listOptions.PageSize)
+	ctx.SetLinkHeader(maxResults, listOptions.PageSize)
 	ctx.SetTotalCountHeader(maxResults)
 	ctx.JSON(http.StatusOK, map[string]any{
 		"ok":   true,
@@ -882,13 +926,15 @@ func ListTeamActivityFeeds(ctx *context.APIContext) {
 		Date:           ctx.FormString("date"),
 		ListOptions:    listOptions,
 	}
+	// A public-only token must not receive private activity entries.
+	opts.ApplyPublicOnly(ctx.PublicOnly)
 
-	feeds, count, err := activities_model.GetFeeds(ctx, opts)
+	feeds, count, err := feed_service.GetFeeds(ctx, opts)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetFeeds", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
+	ctx.SetLinkHeader(count, listOptions.PageSize)
 	ctx.SetTotalCountHeader(count)
-
 	ctx.JSON(http.StatusOK, convert.ToActivities(ctx, feeds, ctx.Doer))
 }

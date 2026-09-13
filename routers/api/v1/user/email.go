@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"net/http"
 
-	user_model "code.gitea.io/gitea/models/user"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/services/context"
-	"code.gitea.io/gitea/services/convert"
-	user_service "code.gitea.io/gitea/services/user"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/setting"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	user_service "gitea.dev/services/user"
 )
 
 // ListEmails list all of the authenticated user's email addresses
@@ -29,7 +30,7 @@ func ListEmails(ctx *context.APIContext) {
 
 	emails, err := user_model.GetEmailAddresses(ctx, ctx.Doer.ID)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetEmailAddresses", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	apiEmails := make([]*api.Email, len(emails))
@@ -57,15 +58,20 @@ func AddEmail(ctx *context.APIContext) {
 	//   "422":
 	//     "$ref": "#/responses/validationError"
 
+	if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageCredentials) {
+		ctx.APIErrorNotFound("emails are not allowed to be changed")
+		return
+	}
+
 	form := web.GetForm(ctx).(*api.CreateEmailOption)
 	if len(form.Emails) == 0 {
-		ctx.Error(http.StatusUnprocessableEntity, "", "Email list empty")
+		ctx.APIError(http.StatusUnprocessableEntity, "Email list empty")
 		return
 	}
 
 	if err := user_service.AddEmailAddresses(ctx, ctx.Doer, form.Emails); err != nil {
 		if user_model.IsErrEmailAlreadyUsed(err) {
-			ctx.Error(http.StatusUnprocessableEntity, "", "Email address has been used: "+err.(user_model.ErrEmailAlreadyUsed).Email)
+			ctx.APIError(http.StatusUnprocessableEntity, "Email address has been used: "+err.(user_model.ErrEmailAlreadyUsed).Email)
 		} else if user_model.IsErrEmailCharIsNotSupported(err) || user_model.IsErrEmailInvalid(err) {
 			email := ""
 			if typedError, ok := err.(user_model.ErrEmailInvalid); ok {
@@ -76,16 +82,16 @@ func AddEmail(ctx *context.APIContext) {
 			}
 
 			errMsg := fmt.Sprintf("Email address %q invalid", email)
-			ctx.Error(http.StatusUnprocessableEntity, "", errMsg)
+			ctx.APIError(http.StatusUnprocessableEntity, errMsg)
 		} else {
-			ctx.Error(http.StatusInternalServerError, "AddEmailAddresses", err)
+			ctx.APIErrorInternal(err)
 		}
 		return
 	}
 
 	emails, err := user_model.GetEmailAddresses(ctx, ctx.Doer.ID)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetEmailAddresses", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
@@ -114,6 +120,11 @@ func DeleteEmail(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
+	if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureManageCredentials) {
+		ctx.APIErrorNotFound("emails are not allowed to be changed")
+		return
+	}
+
 	form := web.GetForm(ctx).(*api.DeleteEmailOption)
 	if len(form.Emails) == 0 {
 		ctx.Status(http.StatusNoContent)
@@ -122,9 +133,9 @@ func DeleteEmail(ctx *context.APIContext) {
 
 	if err := user_service.DeleteEmailAddresses(ctx, ctx.Doer, form.Emails); err != nil {
 		if user_model.IsErrEmailAddressNotExist(err) {
-			ctx.Error(http.StatusNotFound, "DeleteEmailAddresses", err)
+			ctx.APIError(http.StatusNotFound, err.Error())
 		} else {
-			ctx.Error(http.StatusInternalServerError, "DeleteEmailAddresses", err)
+			ctx.APIErrorInternal(err)
 		}
 		return
 	}

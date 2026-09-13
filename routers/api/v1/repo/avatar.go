@@ -7,10 +7,10 @@ import (
 	"encoding/base64"
 	"net/http"
 
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/services/context"
-	repo_service "code.gitea.io/gitea/services/repository"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/services/context"
+	repo_service "gitea.dev/services/repository"
 )
 
 // UpdateVatar updates the Avatar of an Repo
@@ -44,13 +44,13 @@ func UpdateAvatar(ctx *context.APIContext) {
 
 	content, err := base64.StdEncoding.DecodeString(form.Image)
 	if err != nil {
-		ctx.Error(http.StatusBadRequest, "DecodeImage", err)
+		ctx.APIError(http.StatusBadRequest, err.Error())
 		return
 	}
 
 	err = repo_service.UploadAvatar(ctx, ctx.Repo.Repository, content)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "UploadAvatar", err)
+		ctx.APIErrorInternal(err)
 	}
 
 	ctx.Status(http.StatusNoContent)
@@ -81,7 +81,7 @@ func DeleteAvatar(ctx *context.APIContext) {
 	//     "$ref": "#/responses/notFound"
 	err := repo_service.DeleteAvatar(ctx, ctx.Repo.Repository)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "DeleteAvatar", err)
+		ctx.APIErrorInternal(err)
 	}
 
 	ctx.Status(http.StatusNoContent)

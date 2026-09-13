@@ -1,13 +1,13 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_16 //nolint
+package v1_16
 
 import (
 	"testing"
 
-	"code.gitea.io/gitea/models/migrations/base"
-	"code.gitea.io/gitea/modules/timeutil"
+	"gitea.dev/models/migrations/migrationtest"
+	"gitea.dev/modules/timeutil"
 
 	"github.com/stretchr/testify/assert"
 	"xorm.io/xorm/schemas"
@@ -44,7 +44,7 @@ func Test_RemigrateU2FCredentials(t *testing.T) {
 	}
 
 	// Prepare and load the testing database
-	x, deferable := base.PrepareTestEnv(t, 0, new(WebauthnCredential), new(U2fRegistration), new(ExpectedWebauthnCredential))
+	x, deferable := migrationtest.PrepareTestEnv(t, 0, new(WebauthnCredential), new(U2fRegistration), new(ExpectedWebauthnCredential))
 	if x == nil || t.Failed() {
 		defer deferable()
 		return
@@ -71,5 +71,5 @@ func Test_RemigrateU2FCredentials(t *testing.T) {
 		return
 	}
 
-	assert.EqualValues(t, expected, got)
+	assert.Equal(t, expected, got)
 }

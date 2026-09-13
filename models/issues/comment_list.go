@@ -6,21 +6,16 @@ package issues
 import (
 	"context"
 
-	"code.gitea.io/gitea/models/db"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/container"
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/models/db"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/container"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 )
 
 // CommentList defines a list of comments
 type CommentList []*Comment
-
-func (comments CommentList) getPosterIDs() []int64 {
-	return container.FilterSlice(comments, func(c *Comment) (int64, bool) {
-		return c.PosterID, c.PosterID > 0
-	})
-}
 
 // LoadPosters loads posters
 func (comments CommentList) LoadPosters(ctx context.Context) error {
@@ -28,20 +23,26 @@ func (comments CommentList) LoadPosters(ctx context.Context) error {
 		return nil
 	}
 
-	posterMaps, err := getPosters(ctx, comments.getPosterIDs())
+	posterIDs := container.FilterSlice(comments, func(c *Comment) (int64, bool) {
+		return c.PosterID, c.Poster == nil && c.PosterID > 0
+	})
+
+	posterMaps, err := user_model.GetUsersMapByIDs(ctx, posterIDs)
 	if err != nil {
 		return err
 	}
 
 	for _, comment := range comments {
-		comment.Poster = getPoster(comment.PosterID, posterMaps)
+		if comment.Poster == nil {
+			comment.Poster = user_model.GetPossibleUserFromMap(comment.PosterID, posterMaps)
+		}
 	}
 	return nil
 }
 
 func (comments CommentList) getLabelIDs() []int64 {
 	return container.FilterSlice(comments, func(comment *Comment) (int64, bool) {
-		return comment.LabelID, comment.LabelID > 0
+		return comment.LabelID, comment.LabelID > 0 && comment.Label == nil
 	})
 }
 
@@ -51,13 +52,13 @@ func (comments CommentList) loadLabels(ctx context.Context) error {
 	}
 
 	labelIDs := comments.getLabelIDs()
+	if len(labelIDs) == 0 {
+		return nil
+	}
 	commentLabels := make(map[int64]*Label, len(labelIDs))
 	left := len(labelIDs)
 	for left > 0 {
-		limit := db.DefaultMaxInSize
-		if left < limit {
-			limit = left
-		}
+		limit := min(left, db.DefaultMaxInSize)
 		rows, err := db.GetEngine(ctx).
 			In("id", labelIDs[:limit]).
 			Rows(new(Label))
@@ -80,7 +81,7 @@ func (comments CommentList) loadLabels(ctx context.Context) error {
 	}
 
 	for _, comment := range comments {
-		comment.Label = commentLabels[comment.ID]
+		comment.Label = commentLabels[comment.LabelID]
 	}
 	return nil
 }
@@ -104,10 +105,7 @@ func (comments CommentList) loadMilestones(ctx context.Context) error {
 	milestoneMaps := make(map[int64]*Milestone, len(milestoneIDs))
 	left := len(milestoneIDs)
 	for left > 0 {
-		limit := db.DefaultMaxInSize
-		if left < limit {
-			limit = left
-		}
+		limit := min(left, db.DefaultMaxInSize)
 		err := db.GetEngine(ctx).
 			In("id", milestoneIDs[:limit]).
 			Find(&milestoneMaps)
@@ -118,8 +116,8 @@ func (comments CommentList) loadMilestones(ctx context.Context) error {
 		milestoneIDs = milestoneIDs[limit:]
 	}
 
-	for _, issue := range comments {
-		issue.Milestone = milestoneMaps[issue.MilestoneID]
+	for _, comment := range comments {
+		comment.Milestone = milestoneMaps[comment.MilestoneID]
 	}
 	return nil
 }
@@ -143,10 +141,7 @@ func (comments CommentList) loadOldMilestones(ctx context.Context) error {
 	milestoneMaps := make(map[int64]*Milestone, len(milestoneIDs))
 	left := len(milestoneIDs)
 	for left > 0 {
-		limit := db.DefaultMaxInSize
-		if left < limit {
-			limit = left
-		}
+		limit := min(left, db.DefaultMaxInSize)
 		err := db.GetEngine(ctx).
 			In("id", milestoneIDs[:limit]).
 			Find(&milestoneMaps)
@@ -175,13 +170,13 @@ func (comments CommentList) loadAssignees(ctx context.Context) error {
 	}
 
 	assigneeIDs := comments.getAssigneeIDs()
+	if len(assigneeIDs) == 0 {
+		return nil
+	}
 	assignees := make(map[int64]*user_model.User, len(assigneeIDs))
 	left := len(assigneeIDs)
 	for left > 0 {
-		limit := db.DefaultMaxInSize
-		if left < limit {
-			limit = left
-		}
+		limit := min(left, db.DefaultMaxInSize)
 		rows, err := db.GetEngine(ctx).
 			In("id", assigneeIDs[:limit]).
 			Rows(new(user_model.User))
@@ -250,10 +245,7 @@ func (comments CommentList) LoadIssues(ctx context.Context) error {
 	issues := make(map[int64]*Issue, len(issueIDs))
 	left := len(issueIDs)
 	for left > 0 {
-		limit := db.DefaultMaxInSize
-		if left < limit {
-			limit = left
-		}
+		limit := min(left, db.DefaultMaxInSize)
 		rows, err := db.GetEngine(ctx).
 			In("id", issueIDs[:limit]).
 			Rows(new(Issue))
@@ -301,13 +293,13 @@ func (comments CommentList) loadDependentIssues(ctx context.Context) error {
 
 	e := db.GetEngine(ctx)
 	issueIDs := comments.getDependentIssueIDs()
+	if len(issueIDs) == 0 {
+		return nil
+	}
 	issues := make(map[int64]*Issue, len(issueIDs))
 	left := len(issueIDs)
 	for left > 0 {
-		limit := db.DefaultMaxInSize
-		if left < limit {
-			limit = left
-		}
+		limit := min(left, db.DefaultMaxInSize)
 		rows, err := e.
 			In("id", issueIDs[:limit]).
 			Rows(new(Issue))
@@ -383,10 +375,7 @@ func (comments CommentList) LoadAttachments(ctx context.Context) (err error) {
 	commentsIDs := comments.getAttachmentCommentIDs()
 	left := len(commentsIDs)
 	for left > 0 {
-		limit := db.DefaultMaxInSize
-		if left < limit {
-			limit = left
-		}
+		limit := min(left, db.DefaultMaxInSize)
 		rows, err := db.GetEngine(ctx).
 			In("comment_id", commentsIDs[:limit]).
 			Rows(new(repo_model.Attachment))
@@ -427,6 +416,9 @@ func (comments CommentList) loadReviews(ctx context.Context) error {
 	}
 
 	reviewIDs := comments.getReviewIDs()
+	if len(reviewIDs) == 0 {
+		return nil
+	}
 	reviews := make(map[int64]*Review, len(reviewIDs))
 	if err := db.GetEngine(ctx).In("id", reviewIDs).Find(&reviews); err != nil {
 		return err
@@ -448,6 +440,73 @@ func (comments CommentList) loadReviews(ctx context.Context) error {
 			if err := comment.Review.LoadReviewer(ctx); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// loadResolveDoers bulk-loads the resolve doer for all code comments that have one.
+func (comments CommentList) loadResolveDoers(ctx context.Context) error {
+	resolveDoerIDs := container.FilterSlice(comments, func(c *Comment) (int64, bool) {
+		return c.ResolveDoerID, c.ResolveDoerID != 0 && c.Type == CommentTypeCode
+	})
+	if len(resolveDoerIDs) == 0 {
+		return nil
+	}
+
+	userMaps, err := user_model.GetUsersMapByIDs(ctx, resolveDoerIDs)
+	if err != nil {
+		return err
+	}
+
+	for _, comment := range comments {
+		if comment.ResolveDoerID == 0 || comment.Type != CommentTypeCode {
+			continue
+		}
+		if u, ok := userMaps[comment.ResolveDoerID]; ok {
+			comment.ResolveDoer = u
+		} else {
+			comment.ResolveDoer = user_model.NewGhostUser()
+		}
+	}
+	return nil
+}
+
+// loadReactions bulk-loads reactions for all comments in the list.
+func (comments CommentList) loadReactions(ctx context.Context, repo *repo_model.Repository) error {
+	if len(comments) == 0 {
+		return nil
+	}
+
+	commentIDs := container.FilterSlice(comments, func(c *Comment) (int64, bool) {
+		return c.ID, c.Reactions == nil
+	})
+	if len(commentIDs) == 0 {
+		return nil
+	}
+
+	var allReactions ReactionList
+	if err := db.GetEngine(ctx).
+		Where("`comment_id` > 0").
+		In("comment_id", commentIDs).
+		In("`type`", setting.UI.Reactions).
+		Asc("issue_id", "comment_id", "created_unix", "id").
+		Find(&allReactions); err != nil {
+		return err
+	}
+
+	if _, err := allReactions.LoadUsers(ctx, repo); err != nil {
+		return err
+	}
+
+	reactByComment := make(map[int64]ReactionList, len(commentIDs))
+	for _, r := range allReactions {
+		reactByComment[r.CommentID] = append(reactByComment[r.CommentID], r)
+	}
+
+	for _, comment := range comments {
+		if comment.Reactions == nil {
+			comment.Reactions = reactByComment[comment.ID]
 		}
 	}
 	return nil

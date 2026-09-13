@@ -36,9 +36,10 @@ func PathJoinRel(elem ...string) string {
 		elems[i] = path.Clean("/" + e)
 	}
 	p := path.Join(elems...)
-	if p == "" {
+	switch p {
+	case "":
 		return ""
-	} else if p == "/" {
+	case "/":
 		return "."
 	}
 	return p[1:]
@@ -63,7 +64,7 @@ func PathJoinRelX(elem ...string) string {
 	return PathJoinRel(elems...)
 }
 
-const pathSeparator = string(os.PathSeparator)
+const filepathSeparator = string(os.PathSeparator)
 
 // FilePathJoinAbs joins the path elements into a single file path, each element is cleaned by filepath.Clean separately.
 // All slashes/backslashes are converted to path separators before cleaning, the result only contains path separators.
@@ -74,30 +75,32 @@ const pathSeparator = string(os.PathSeparator)
 //	{`/foo`, ``, `bar`} => `/foo/bar`
 //	{`/foo`, `..`, `bar`} => `/foo/bar`
 func FilePathJoinAbs(base string, sub ...string) string {
-	elems := make([]string, 1, len(sub)+1)
-
 	// POSIX filesystem can have `\` in file names. Windows: `\` and `/` are both used for path separators
 	// to keep the behavior consistent, we do not allow `\` in file names, replace all `\` with `/`
-	if isOSWindows() {
-		elems[0] = filepath.Clean(base)
-	} else {
-		elems[0] = filepath.Clean(strings.ReplaceAll(base, "\\", pathSeparator))
+	if !isOSWindows() {
+		base = strings.ReplaceAll(base, "\\", filepathSeparator)
 	}
-	if !filepath.IsAbs(elems[0]) {
-		// This shouldn't happen. If there is really necessary to pass in relative path, return the full path with filepath.Abs() instead
-		panic(fmt.Sprintf("FilePathJoinAbs: %q (for path %v) is not absolute, do not guess a relative path based on current working directory", elems[0], elems))
+	if !filepath.IsAbs(base) {
+		// This shouldn't happen. If it is really necessary to handle relative paths, use filepath.Abs() to get absolute paths first
+		panic(fmt.Sprintf("FilePathJoinAbs: %q (for path %v) is not absolute, do not guess a relative path based on current working directory", base, sub))
 	}
+	if len(sub) == 0 {
+		return filepath.Clean(base)
+	}
+
+	elems := make([]string, 1, len(sub)+1)
+	elems[0] = base
 	for _, s := range sub {
 		if s == "" {
 			continue
 		}
 		if isOSWindows() {
-			elems = append(elems, filepath.Clean(pathSeparator+s))
+			elems = append(elems, filepath.Clean(filepathSeparator+s))
 		} else {
-			elems = append(elems, filepath.Clean(pathSeparator+strings.ReplaceAll(s, "\\", pathSeparator)))
+			elems = append(elems, filepath.Clean(filepathSeparator+strings.ReplaceAll(s, "\\", filepathSeparator)))
 		}
 	}
-	// the elems[0] must be an absolute path, just join them together
+	// the elems[0] must be an absolute path, just join them together, and Join will also do Clean
 	return filepath.Join(elems...)
 }
 
@@ -114,17 +117,72 @@ func IsDir(dir string) (bool, error) {
 	return false, err
 }
 
-// IsFile returns true if given path is a file,
-// or returns false when it's a directory or does not exist.
-func IsFile(filePath string) (bool, error) {
-	f, err := os.Stat(filePath)
-	if err == nil {
-		return !f.IsDir(), nil
+var ErrNotRegularPathFile = errors.New("not a regular file")
+
+// ReadRegularPathFile reads a file with given sub path in root dir.
+// It returns error when the path is not a regular file, or any parent path is not a regular directory.
+func ReadRegularPathFile(root, filePathIn string, limit int) ([]byte, error) {
+	pathFields := strings.Split(PathJoinRelX(filePathIn), "/")
+
+	targetPathBuilder := strings.Builder{}
+	targetPathBuilder.Grow(len(root) + len(filePathIn) + 2)
+	targetPathBuilder.WriteString(root)
+	targetPathString := root
+	for i, subPath := range pathFields {
+		targetPathBuilder.WriteByte(filepath.Separator)
+		targetPathBuilder.WriteString(subPath)
+		targetPathString = targetPathBuilder.String()
+
+		expectFile := i == len(pathFields)-1
+		st, err := os.Lstat(targetPathString)
+		if err != nil {
+			return nil, err
+		}
+		if expectFile && !st.Mode().IsRegular() || !expectFile && !st.Mode().IsDir() {
+			return nil, fmt.Errorf("%w: %s", ErrNotRegularPathFile, filePathIn)
+		}
 	}
-	if os.IsNotExist(err) {
-		return false, nil
+	f, err := os.Open(targetPathString)
+	if err != nil {
+		return nil, err
 	}
-	return false, err
+	defer f.Close()
+	return ReadWithLimit(f, limit)
+}
+
+// WriteRegularPathFile writes data to a file with given sub path in root dir, it creates parent directories if necessary.
+// The file is created with fileMode, and the directories are created with dirMode.
+// It returns error when the path already exists but is not a regular file, or any parent path is not a regular directory.
+func WriteRegularPathFile(root, filePathIn string, data []byte, dirMode, fileMode os.FileMode) error {
+	pathFields := strings.Split(PathJoinRelX(filePathIn), "/")
+
+	targetPathBuilder := strings.Builder{}
+	targetPathBuilder.Grow(len(root) + len(filePathIn) + 2)
+	targetPathBuilder.WriteString(root)
+	targetPathString := root
+	for i, subPath := range pathFields {
+		targetPathBuilder.WriteByte(filepath.Separator)
+		targetPathBuilder.WriteString(subPath)
+		targetPathString = targetPathBuilder.String()
+
+		expectFile := i == len(pathFields)-1
+		st, err := os.Lstat(targetPathString)
+		if err == nil {
+			if expectFile && !st.Mode().IsRegular() || !expectFile && !st.Mode().IsDir() {
+				return fmt.Errorf("%w: %s", ErrNotRegularPathFile, filePathIn)
+			}
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if !expectFile {
+			if err = os.Mkdir(targetPathString, dirMode); err != nil {
+				return err
+			}
+		}
+	}
+	return os.WriteFile(targetPathString, data, fileMode)
 }
 
 // IsExist checks whether a file or directory exists.
@@ -140,81 +198,51 @@ func IsExist(path string) (bool, error) {
 	return false, err
 }
 
-func statDir(dirPath, recPath string, includeDir, isDirOnly, followSymlinks bool) ([]string, error) {
-	dir, err := os.Open(dirPath)
+func listDirRecursively(result *[]string, fsDir, recordParentPath string, opts *ListDirOptions) error {
+	dir, err := os.Open(fsDir)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer dir.Close()
 
 	fis, err := dir.Readdir(0)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	statList := make([]string, 0)
 	for _, fi := range fis {
-		if CommonSkip(fi.Name()) {
+		if opts.SkipCommonHiddenNames && IsCommonHiddenFileName(fi.Name()) {
 			continue
 		}
-
-		relPath := path.Join(recPath, fi.Name())
-		curPath := path.Join(dirPath, fi.Name())
+		relPath := path.Join(recordParentPath, fi.Name())
+		curPath := filepath.Join(fsDir, fi.Name())
 		if fi.IsDir() {
-			if includeDir {
-				statList = append(statList, relPath+"/")
+			if opts.IncludeDir {
+				*result = append(*result, relPath+"/")
 			}
-			s, err := statDir(curPath, relPath, includeDir, isDirOnly, followSymlinks)
-			if err != nil {
-				return nil, err
+			if err = listDirRecursively(result, curPath, relPath, opts); err != nil {
+				return err
 			}
-			statList = append(statList, s...)
-		} else if !isDirOnly {
-			statList = append(statList, relPath)
-		} else if followSymlinks && fi.Mode()&os.ModeSymlink != 0 {
-			link, err := os.Readlink(curPath)
-			if err != nil {
-				return nil, err
-			}
-
-			isDir, err := IsDir(link)
-			if err != nil {
-				return nil, err
-			}
-			if isDir {
-				if includeDir {
-					statList = append(statList, relPath+"/")
-				}
-				s, err := statDir(curPath, relPath, includeDir, isDirOnly, followSymlinks)
-				if err != nil {
-					return nil, err
-				}
-				statList = append(statList, s...)
-			}
+		} else {
+			*result = append(*result, relPath)
 		}
 	}
-	return statList, nil
+	return nil
 }
 
-// StatDir gathers information of given directory by depth-first.
-// It returns slice of file list and includes subdirectories if enabled;
-// it returns error and nil slice when error occurs in underlying functions,
-// or given path is not a directory or does not exist.
-//
-// Slice does not include given path itself.
-// If subdirectories is enabled, they will have suffix '/'.
-func StatDir(rootPath string, includeDir ...bool) ([]string, error) {
-	if isDir, err := IsDir(rootPath); err != nil {
-		return nil, err
-	} else if !isDir {
-		return nil, errors.New("not a directory or does not exist: " + rootPath)
-	}
+type ListDirOptions struct {
+	IncludeDir            bool // subdirectories are also included with suffix slash
+	SkipCommonHiddenNames bool
+}
 
-	isIncludeDir := false
-	if len(includeDir) != 0 {
-		isIncludeDir = includeDir[0]
+// ListDirRecursively gathers information of given directory by depth-first.
+// The paths are always in "dir/slash/file" format (not "\\" even in Windows)
+// Slice does not include given path itself.
+func ListDirRecursively(rootDir string, opts *ListDirOptions) (res []string, err error) {
+	if err = listDirRecursively(&res, rootDir, "", opts); err != nil {
+		return nil, err
 	}
-	return statDir(rootPath, "", isIncludeDir, false, false)
+	return res, nil
 }
 
 func isOSWindows() bool {
@@ -265,8 +293,8 @@ func HomeDir() (home string, err error) {
 	return home, nil
 }
 
-// CommonSkip will check a provided name to see if it represents file or directory that should not be watched
-func CommonSkip(name string) bool {
+// IsCommonHiddenFileName will check a provided name to see if it represents file or directory that should not be watched
+func IsCommonHiddenFileName(name string) bool {
 	if name == "" {
 		return true
 	}
@@ -275,9 +303,9 @@ func CommonSkip(name string) bool {
 	case '.':
 		return true
 	case 't', 'T':
-		return name[1:] == "humbs.db"
+		return name[1:] == "humbs.db" // macOS
 	case 'd', 'D':
-		return name[1:] == "esktop.ini"
+		return name[1:] == "esktop.ini" // Windows
 	}
 
 	return false

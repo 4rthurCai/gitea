@@ -1,24 +1,22 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_12 //nolint
+package v1_12
 
 import (
 	"fmt"
 	"math"
-	"path/filepath"
-	"strings"
 	"time"
 
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/graceful"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-
-	"xorm.io/xorm"
+	"gitea.dev/models/db"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/modules/gitrepo"
+	"gitea.dev/modules/graceful"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 )
 
-func AddCommitDivergenceToPulls(x *xorm.Engine) error {
+func AddCommitDivergenceToPulls(x db.EngineMigration) error {
 	type Repository struct {
 		ID        int64 `xorm:"pk autoincr"`
 		OwnerID   int64 `xorm:"UNIQUE(s) index"`
@@ -85,12 +83,9 @@ func AddCommitDivergenceToPulls(x *xorm.Engine) error {
 				log.Error("Missing base repo with id %d for PR ID %d", pr.BaseRepoID, pr.ID)
 				continue
 			}
-			userPath := filepath.Join(setting.RepoRootPath, strings.ToLower(baseRepo.OwnerName))
-			repoPath := filepath.Join(userPath, strings.ToLower(baseRepo.Name)+".git")
-
+			repoStore := repo_model.StorageRepo(repo_model.RelativePath(baseRepo.OwnerName, baseRepo.Name))
 			gitRefName := fmt.Sprintf("refs/pull/%d/head", pr.Index)
-
-			divergence, err := git.GetDivergingCommits(graceful.GetManager().HammerContext(), repoPath, pr.BaseBranch, gitRefName)
+			divergence, err := gitrepo.GetDivergingCommits(graceful.GetManager().HammerContext(), repoStore, pr.BaseBranch, gitRefName)
 			if err != nil {
 				log.Warn("Could not recalculate Divergence for pull: %d", pr.ID)
 				pr.CommitsAhead = 0

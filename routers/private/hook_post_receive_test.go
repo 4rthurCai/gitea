@@ -6,44 +6,43 @@ package private
 import (
 	"testing"
 
-	"code.gitea.io/gitea/models/db"
-	issues_model "code.gitea.io/gitea/models/issues"
-	pull_model "code.gitea.io/gitea/models/pull"
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/models/unittest"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/private"
-	repo_module "code.gitea.io/gitea/modules/repository"
-	"code.gitea.io/gitea/services/contexttest"
+	issues_model "gitea.dev/models/issues"
+	pull_model "gitea.dev/models/pull"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/private"
+	repo_module "gitea.dev/modules/repository"
+	"gitea.dev/services/contexttest"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestHandlePullRequestMerging(t *testing.T) {
 	assert.NoError(t, unittest.PrepareTestDatabase())
-	pr, err := issues_model.GetUnmergedPullRequest(db.DefaultContext, 1, 1, "branch2", "master", issues_model.PullRequestFlowGithub)
+	pr, err := issues_model.GetUnmergedPullRequest(t.Context(), 1, 1, "branch2", "master", issues_model.PullRequestFlowGithub)
 	assert.NoError(t, err)
-	assert.NoError(t, pr.LoadBaseRepo(db.DefaultContext))
+	assert.NoError(t, pr.LoadBaseRepo(t.Context()))
 
 	user1 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 1})
 
-	err = pull_model.ScheduleAutoMerge(db.DefaultContext, user1, pr.ID, repo_model.MergeStyleSquash, "squash merge a pr")
+	err = pull_model.ScheduleAutoMerge(t.Context(), user1, pr.ID, repo_model.MergeStyleSquash, "squash merge a pr", false)
 	assert.NoError(t, err)
 
 	autoMerge := unittest.AssertExistsAndLoadBean(t, &pull_model.AutoMerge{PullID: pr.ID})
 
 	ctx, resp := contexttest.MockPrivateContext(t, "/")
-	handlePullRequestMerging(ctx, &private.HookOptions{
+	hookPostReceiveHandlePullRequestMerging(ctx, &private.HookOptions{
 		PullRequestID: pr.ID,
 		UserID:        2,
-	}, pr.BaseRepo.OwnerName, pr.BaseRepo.Name, []*repo_module.PushUpdateOptions{
+	}, []*repo_module.PushUpdateOptions{
 		{NewCommitID: "01234567"},
 	})
-	assert.Equal(t, 0, len(resp.Body.String()))
-	pr, err = issues_model.GetPullRequestByID(db.DefaultContext, pr.ID)
+	assert.Empty(t, resp.Body.String())
+	pr, err = issues_model.GetPullRequestByID(t.Context(), pr.ID)
 	assert.NoError(t, err)
 	assert.True(t, pr.HasMerged)
-	assert.EqualValues(t, "01234567", pr.MergedCommitID)
+	assert.Equal(t, "01234567", pr.MergedCommitID)
 
 	unittest.AssertNotExistsBean(t, &pull_model.AutoMerge{ID: autoMerge.ID})
 }

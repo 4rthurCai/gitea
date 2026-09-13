@@ -1,17 +1,16 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_8 //nolint
+package v1_8
 
 import (
 	"fmt"
 
-	"code.gitea.io/gitea/modules/timeutil"
-
-	"xorm.io/xorm"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/timeutil"
 )
 
-func AddPullRequestRebaseWithMerge(x *xorm.Engine) error {
+func AddPullRequestRebaseWithMerge(x db.EngineMigration) error {
 	// RepoUnit describes all units of a repository
 	type RepoUnit struct {
 		ID          int64

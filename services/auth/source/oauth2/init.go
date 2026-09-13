@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"sync"
 
-	"code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/optional"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/models/auth"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
@@ -22,22 +22,15 @@ import (
 
 var gothRWMutex = sync.RWMutex{}
 
-// UsersStoreKey is the key for the store
-const UsersStoreKey = "gitea-oauth2-sessions"
-
 // ProviderHeaderKey is the HTTP header key
 const ProviderHeaderKey = "gitea-oauth2-provider"
 
 // Init initializes the oauth source
 func Init(ctx context.Context) error {
-	if err := InitSigningKey(); err != nil {
-		return err
-	}
-
 	// Lock our mutex
 	gothRWMutex.Lock()
 
-	gob.Register(&sessions.Session{})
+	gob.Register(&sessions.Session{}) // TODO: CHI-SESSION-GOB-REGISTER. FIXME: it seems to be an abuse, why the Session struct itself is stored in session store again?
 
 	gothic.Store = &SessionsStore{
 		maxLength: int64(setting.OAuth2.MaxTokenLength),
@@ -79,7 +72,7 @@ func initOAuth2Sources(ctx context.Context) error {
 		}
 		err := oauth2Source.RegisterSource()
 		if err != nil {
-			log.Critical("Unable to register source: %s due to Error: %v.", source.Name, err)
+			log.Error("Unable to register source: %s due to Error: %v.", source.Name, err)
 		}
 	}
 	return nil

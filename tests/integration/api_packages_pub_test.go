@@ -15,13 +15,12 @@ import (
 	"testing"
 	"time"
 
-	auth_model "code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/models/unittest"
-	user_model "code.gitea.io/gitea/models/user"
-	pub_module "code.gitea.io/gitea/modules/packages/pub"
-	"code.gitea.io/gitea/tests"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/packages"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	pub_module "gitea.dev/modules/packages/pub"
+	"gitea.dev/tests"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -37,7 +36,7 @@ func TestPackagePub(t *testing.T) {
 	packageVersion := "1.0.1"
 	packageDescription := "Test Description"
 
-	filename := fmt.Sprintf("%s.tar.gz", packageVersion)
+	filename := packageVersion + ".tar.gz"
 
 	pubspecContent := `name: ` + packageName + `
 version: ` + packageVersion + `
@@ -75,8 +74,7 @@ description: ` + packageDescription
 			Fields map[string]string `json:"fields"`
 		}
 
-		var result UploadRequest
-		DecodeJSON(t, resp, &result)
+		result := DecodeJSON(t, resp, &UploadRequest{})
 
 		assert.Empty(t, result.Fields)
 
@@ -100,24 +98,24 @@ description: ` + packageDescription
 			AddTokenAuth(token)
 		MakeRequest(t, req, http.StatusOK)
 
-		pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypePub)
+		pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypePub)
 		assert.NoError(t, err)
 		assert.Len(t, pvs, 1)
 
-		pd, err := packages.GetPackageDescriptor(db.DefaultContext, pvs[0])
+		pd, err := packages.GetPackageDescriptor(t.Context(), pvs[0])
 		assert.NoError(t, err)
 		assert.NotNil(t, pd.SemVer)
 		assert.IsType(t, &pub_module.Metadata{}, pd.Metadata)
 		assert.Equal(t, packageName, pd.Package.Name)
 		assert.Equal(t, packageVersion, pd.Version.Version)
 
-		pfs, err := packages.GetFilesByVersionID(db.DefaultContext, pvs[0].ID)
+		pfs, err := packages.GetFilesByVersionID(t.Context(), pvs[0].ID)
 		assert.NoError(t, err)
 		assert.Len(t, pfs, 1)
 		assert.Equal(t, filename, pfs[0].Name)
 		assert.True(t, pfs[0].IsLead)
 
-		pb, err := packages.GetBlobByID(db.DefaultContext, pfs[0].BlobID)
+		pb, err := packages.GetBlobByID(t.Context(), pfs[0].BlobID)
 		assert.NoError(t, err)
 		assert.Equal(t, int64(len(content)), pb.Size)
 
@@ -137,8 +135,7 @@ description: ` + packageDescription
 			Pubspec    any       `json:"pubspec,omitempty"`
 		}
 
-		var result VersionMetadata
-		DecodeJSON(t, resp, &result)
+		result := DecodeJSON(t, resp, &VersionMetadata{})
 
 		assert.Equal(t, packageVersion, result.Version)
 		assert.NotNil(t, result.Pubspec)
@@ -168,8 +165,7 @@ description: ` + packageDescription
 			Versions []*VersionMetadata `json:"versions"`
 		}
 
-		var result PackageVersions
-		DecodeJSON(t, resp, &result)
+		result := DecodeJSON(t, resp, &PackageVersions{})
 
 		assert.Equal(t, packageName, result.Name)
 		assert.NotNil(t, result.Latest)

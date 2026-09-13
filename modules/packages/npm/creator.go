@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"code.gitea.io/gitea/modules/json"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/modules/validation"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/util"
+	"gitea.dev/modules/validation"
 
 	"github.com/hashicorp/go-version"
 )
@@ -58,11 +58,32 @@ type PackageMetadata struct {
 	Time           map[string]time.Time               `json:"time,omitempty"`
 	Homepage       string                             `json:"homepage,omitempty"`
 	Keywords       []string                           `json:"keywords,omitempty"`
-	Repository     Repository                         `json:"repository,omitempty"`
+	Repository     Repository                         `json:"repository"`
 	Author         User                               `json:"author"`
 	ReadmeFilename string                             `json:"readmeFilename,omitempty"`
 	Users          map[string]bool                    `json:"users,omitempty"`
-	License        string                             `json:"license,omitempty"`
+	License        License                            `json:"license,omitempty"`
+}
+
+type License string
+
+func (l *License) UnmarshalJSON(data []byte) error {
+	switch data[0] {
+	case '"':
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		*l = License(value)
+	case '{':
+		var values map[string]any
+		if err := json.Unmarshal(data, &values); err != nil {
+			return err
+		}
+		value, _ := values["type"].(string)
+		*l = License(value)
+	}
+	return nil
 }
 
 // PackageMetadataVersion documentation: https://github.com/npm/registry/blob/master/docs/REGISTRY-API.md#version
@@ -74,13 +95,15 @@ type PackageMetadataVersion struct {
 	Description          string              `json:"description"`
 	Author               User                `json:"author"`
 	Homepage             string              `json:"homepage,omitempty"`
-	License              string              `json:"license,omitempty"`
-	Repository           Repository          `json:"repository,omitempty"`
+	License              License             `json:"license,omitempty"`
+	Repository           Repository          `json:"repository"`
 	Keywords             []string            `json:"keywords,omitempty"`
 	Dependencies         map[string]string   `json:"dependencies,omitempty"`
+	BundleDependencies   []string            `json:"bundleDependencies,omitempty"`
 	DevDependencies      map[string]string   `json:"devDependencies,omitempty"`
 	PeerDependencies     map[string]string   `json:"peerDependencies,omitempty"`
-	Bin                  map[string]string   `json:"bin,omitempty"`
+	PeerDependenciesMeta map[string]any      `json:"peerDependenciesMeta,omitempty"`
+	Bin                  Bin                 `json:"bin,omitempty"`
 	OptionalDependencies map[string]string   `json:"optionalDependencies,omitempty"`
 	Readme               string              `json:"readme,omitempty"`
 	Dist                 PackageDistribution `json:"dist"`
@@ -158,10 +181,54 @@ func (u *User) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Repository https://github.com/npm/registry/blob/master/docs/REGISTRY-API.md#version
+// Repository https://docs.npmjs.com/cli/v11/configuring-npm/package-json#repository
 type Repository struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
+	Type      string `json:"type"`
+	URL       string `json:"url"`
+	Directory string `json:"directory,omitempty"`
+}
+
+// UnmarshalJSON is needed because the repository field can be a string or an object.
+func (r *Repository) UnmarshalJSON(data []byte) error {
+	switch data[0] {
+	case '"':
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		r.URL = value
+	case '{':
+		type repositoryAlias Repository // avoid recursion into this method
+		var value repositoryAlias
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		*r = Repository(value)
+	}
+	return nil
+}
+
+// Bin maps command names to executable files. npm also allows a single string,
+// in which case the command is named after the package (resolved in ParsePackage).
+type Bin map[string]string
+
+// UnmarshalJSON is needed because the bin field can be a string or an object.
+func (b *Bin) UnmarshalJSON(data []byte) error {
+	switch data[0] {
+	case '"':
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		*b = Bin{"": value}
+	case '{':
+		var value map[string]string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		*b = value
+	}
+	return nil
 }
 
 // PackageAttachment https://github.com/npm/registry/blob/master/docs/REGISTRY-API.md#package
@@ -205,6 +272,11 @@ func ParsePackage(r io.Reader) (*Package, error) {
 			meta.Homepage = ""
 		}
 
+		// A string "bin" means a single executable named after the package.
+		if cmd, ok := meta.Bin[""]; ok && len(meta.Bin) == 1 {
+			meta.Bin = Bin{name: cmd}
+		}
+
 		p := &Package{
 			Name:     meta.Name,
 			Version:  v.String(),
@@ -218,8 +290,10 @@ func ParsePackage(r io.Reader) (*Package, error) {
 				ProjectURL:              meta.Homepage,
 				Keywords:                meta.Keywords,
 				Dependencies:            meta.Dependencies,
+				BundleDependencies:      meta.BundleDependencies,
 				DevelopmentDependencies: meta.DevDependencies,
 				PeerDependencies:        meta.PeerDependencies,
+				PeerDependenciesMeta:    meta.PeerDependenciesMeta,
 				OptionalDependencies:    meta.OptionalDependencies,
 				Bin:                     meta.Bin,
 				Readme:                  meta.Readme,

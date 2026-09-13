@@ -4,26 +4,18 @@
 package git
 
 import (
-	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGetLatestCommitTime(t *testing.T) {
-	bareRepo1Path := filepath.Join(testReposDir, "repo1_bare")
-	lct, err := GetLatestCommitTime(DefaultContext, bareRepo1Path)
-	assert.NoError(t, err)
-	// Time is Sun Nov 13 16:40:14 2022 +0100
-	// which is the time of commit
-	// ce064814f4a0d337b333e646ece456cd39fab612 (refs/heads/master)
-	assert.EqualValues(t, 1668354014, lct.Unix())
-}
-
 func TestRepoIsEmpty(t *testing.T) {
 	emptyRepo2Path := filepath.Join(testReposDir, "repo2_empty")
-	repo, err := openRepositoryWithDefaultContext(emptyRepo2Path)
+	repo, err := OpenRepository(t.Context(), emptyRepo2Path)
 	assert.NoError(t, err)
 	defer repo.Close()
 	isEmpty, err := repo.IsEmpty()
@@ -31,26 +23,23 @@ func TestRepoIsEmpty(t *testing.T) {
 	assert.True(t, isEmpty)
 }
 
-func TestRepoGetDivergingCommits(t *testing.T) {
-	bareRepo1Path := filepath.Join(testReposDir, "repo1_bare")
-	do, err := GetDivergingCommits(context.Background(), bareRepo1Path, "master", "branch2")
-	assert.NoError(t, err)
-	assert.Equal(t, DivergeObject{
-		Ahead:  1,
-		Behind: 5,
-	}, do)
+// TestCloneRefusesRedirects ensures Clone never follows HTTP redirects, so a remote
+// cannot redirect to an otherwise-blocked address (SSRF, e.g. during migration).
+func TestCloneRefusesRedirects(t *testing.T) {
+	t.Skip("FIXME: GIT-CLONE-HTTP-REDIRECT-SSRF: need a complete solution in the future")
+	var targetHit atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHit.Store(true)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer target.Close()
 
-	do, err = GetDivergingCommits(context.Background(), bareRepo1Path, "master", "master")
-	assert.NoError(t, err)
-	assert.Equal(t, DivergeObject{
-		Ahead:  0,
-		Behind: 0,
-	}, do)
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer redirect.Close()
 
-	do, err = GetDivergingCommits(context.Background(), bareRepo1Path, "master", "test")
-	assert.NoError(t, err)
-	assert.Equal(t, DivergeObject{
-		Ahead:  0,
-		Behind: 2,
-	}, do)
+	err := Clone(t.Context(), redirect.URL, filepath.Join(t.TempDir(), "dst"), CloneRepoOptions{})
+	assert.Error(t, err)
+	assert.False(t, targetHit.Load(), "git must not follow the redirect to the target")
 }

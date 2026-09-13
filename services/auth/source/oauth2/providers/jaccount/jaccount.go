@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"code.gitea.io/gitea/modules/json"
+	"gitea.dev/modules/json"
 
 	"github.com/markbates/goth"
 	"golang.org/x/oauth2"

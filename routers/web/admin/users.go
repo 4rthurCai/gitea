@@ -11,32 +11,32 @@ import (
 	"strconv"
 	"strings"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/db"
-	org_model "code.gitea.io/gitea/models/organization"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/auth/password"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/optional"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/routers/web/explore"
-	user_setting "code.gitea.io/gitea/routers/web/user/setting"
-	"code.gitea.io/gitea/services/context"
-	"code.gitea.io/gitea/services/forms"
-	"code.gitea.io/gitea/services/mailer"
-	user_service "code.gitea.io/gitea/services/user"
+	"gitea.dev/models/auth"
+	"gitea.dev/models/db"
+	org_model "gitea.dev/models/organization"
+	packages_model "gitea.dev/models/packages"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/auth/password"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/structs"
+	"gitea.dev/modules/templates"
+	"gitea.dev/modules/web"
+	"gitea.dev/routers/web/explore"
+	user_setting "gitea.dev/routers/web/user/setting"
+	"gitea.dev/services/context"
+	"gitea.dev/services/forms"
+	"gitea.dev/services/mailer"
+	user_service "gitea.dev/services/user"
 )
 
 const (
-	tplUsers    base.TplName = "admin/user/list"
-	tplUserNew  base.TplName = "admin/user/new"
-	tplUserView base.TplName = "admin/user/view"
-	tplUserEdit base.TplName = "admin/user/edit"
+	tplUsers    templates.TplName = "admin/user/list"
+	tplUserNew  templates.TplName = "admin/user/new"
+	tplUserView templates.TplName = "admin/user/view"
+	tplUserEdit templates.TplName = "admin/user/edit"
 )
 
 // UserSearchDefaultAdminSort is the default sort type for admin view
@@ -47,42 +47,34 @@ func Users(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("admin.users")
 	ctx.Data["PageIsAdminUsers"] = true
 
-	extraParamStrings := map[string]string{}
 	statusFilterKeys := []string{"is_active", "is_admin", "is_restricted", "is_2fa_enabled", "is_prohibit_login"}
 	statusFilterMap := map[string]string{}
 	for _, filterKey := range statusFilterKeys {
 		paramKey := "status_filter[" + filterKey + "]"
 		paramVal := ctx.FormString(paramKey)
 		statusFilterMap[filterKey] = paramVal
-		if paramVal != "" {
-			extraParamStrings[paramKey] = paramVal
-		}
 	}
 
-	sortType := ctx.FormString("sort")
-	if sortType == "" {
-		sortType = UserSearchDefaultAdminSort
-		ctx.SetFormString("sort", sortType)
-	}
+	sortType := ctx.FormString("sort", UserSearchDefaultAdminSort)
 	ctx.PageData["adminUserListSearchForm"] = map[string]any{
 		"StatusFilterMap": statusFilterMap,
 		"SortType":        sortType,
 	}
 
-	explore.RenderUserSearch(ctx, &user_model.SearchUserOptions{
+	explore.RenderUserSearch(ctx, user_model.SearchUserOptions{
 		Actor: ctx.Doer,
-		Type:  user_model.UserTypeIndividual,
+		Types: []user_model.UserType{user_model.UserTypeIndividual},
 		ListOptions: db.ListOptions{
 			PageSize: setting.UI.Admin.UserPagingNum,
 		},
 		SearchByEmail:      true,
-		IsActive:           util.OptionalBoolParse(statusFilterMap["is_active"]),
-		IsAdmin:            util.OptionalBoolParse(statusFilterMap["is_admin"]),
-		IsRestricted:       util.OptionalBoolParse(statusFilterMap["is_restricted"]),
-		IsTwoFactorEnabled: util.OptionalBoolParse(statusFilterMap["is_2fa_enabled"]),
-		IsProhibitLogin:    util.OptionalBoolParse(statusFilterMap["is_prohibit_login"]),
+		IsActive:           optional.ParseBool(statusFilterMap["is_active"]),
+		IsAdmin:            optional.ParseBool(statusFilterMap["is_admin"]),
+		IsRestricted:       optional.ParseBool(statusFilterMap["is_restricted"]),
+		IsTwoFactorEnabled: optional.ParseBool(statusFilterMap["is_2fa_enabled"]),
+		IsProhibitLogin:    optional.ParseBool(statusFilterMap["is_prohibit_login"]),
 		IncludeReserved:    true, // administrator needs to list all accounts include reserved, bot, remote ones
-		ExtraParamStrings:  extraParamStrings,
+		OrderBy:            db.SearchOrderBy(sortType),
 	}, tplUsers)
 }
 
@@ -156,47 +148,47 @@ func NewUserPost(ctx *context.Context) {
 	if u.LoginType == auth.NoType || u.LoginType == auth.Plain {
 		if len(form.Password) < setting.MinPasswordLength {
 			ctx.Data["Err_Password"] = true
-			ctx.RenderWithErr(ctx.Tr("auth.password_too_short", setting.MinPasswordLength), tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("auth.password_too_short", setting.MinPasswordLength), tplUserNew, &form)
 			return
 		}
 		if !password.IsComplexEnough(form.Password) {
 			ctx.Data["Err_Password"] = true
-			ctx.RenderWithErr(password.BuildComplexityError(ctx.Locale), tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(password.BuildComplexityError(ctx.Locale), tplUserNew, &form)
 			return
 		}
 		if err := password.IsPwned(ctx, form.Password); err != nil {
 			ctx.Data["Err_Password"] = true
-			errMsg := ctx.Tr("auth.password_pwned")
+			errMsg := ctx.Tr("auth.password_pwned", "https://haveibeenpwned.com/Passwords")
 			if password.IsErrIsPwnedRequest(err) {
 				log.Error(err.Error())
 				errMsg = ctx.Tr("auth.password_pwned_err")
 			}
-			ctx.RenderWithErr(errMsg, tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(errMsg, tplUserNew, &form)
 			return
 		}
 		u.MustChangePassword = form.MustChangePassword
 	}
 
-	if err := user_model.AdminCreateUser(ctx, u, overwriteDefault); err != nil {
+	if err := user_model.AdminCreateUser(ctx, u, &user_model.Meta{}, overwriteDefault); err != nil {
 		switch {
 		case user_model.IsErrUserAlreadyExist(err):
 			ctx.Data["Err_UserName"] = true
-			ctx.RenderWithErr(ctx.Tr("form.username_been_taken"), tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("form.username_been_taken"), tplUserNew, &form)
 		case user_model.IsErrEmailAlreadyUsed(err):
 			ctx.Data["Err_Email"] = true
-			ctx.RenderWithErr(ctx.Tr("form.email_been_used"), tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("form.email_been_used"), tplUserNew, &form)
 		case user_model.IsErrEmailInvalid(err), user_model.IsErrEmailCharIsNotSupported(err):
 			ctx.Data["Err_Email"] = true
-			ctx.RenderWithErr(ctx.Tr("form.email_invalid"), tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("form.email_invalid"), tplUserNew, &form)
 		case db.IsErrNameReserved(err):
 			ctx.Data["Err_UserName"] = true
-			ctx.RenderWithErr(ctx.Tr("user.form.name_reserved", err.(db.ErrNameReserved).Name), tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("user.form.name_reserved", err.(db.ErrNameReserved).Name), tplUserNew, &form)
 		case db.IsErrNamePatternNotAllowed(err):
 			ctx.Data["Err_UserName"] = true
-			ctx.RenderWithErr(ctx.Tr("user.form.name_pattern_not_allowed", err.(db.ErrNamePatternNotAllowed).Pattern), tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("user.form.name_pattern_not_allowed", err.(db.ErrNamePatternNotAllowed).Pattern), tplUserNew, &form)
 		case db.IsErrNameCharsNotAllowed(err):
 			ctx.Data["Err_UserName"] = true
-			ctx.RenderWithErr(ctx.Tr("user.form.name_chars_not_allowed", err.(db.ErrNameCharsNotAllowed).Name), tplUserNew, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("user.form.name_chars_not_allowed", err.(db.ErrNameCharsNotAllowed).Name), tplUserNew, &form)
 		default:
 			ctx.ServerError("CreateUser", err)
 		}
@@ -215,14 +207,14 @@ func NewUserPost(ctx *context.Context) {
 	}
 
 	ctx.Flash.Success(ctx.Tr("admin.users.new_success", u.Name))
-	ctx.Redirect(setting.AppSubURL + "/admin/users/" + strconv.FormatInt(u.ID, 10))
+	ctx.Redirect(setting.AppSubURL + "/-/admin/users/" + strconv.FormatInt(u.ID, 10))
 }
 
 func prepareUserInfo(ctx *context.Context) *user_model.User {
-	u, err := user_model.GetUserByID(ctx, ctx.ParamsInt64(":userid"))
+	u, err := user_model.GetUserByID(ctx, ctx.PathParamInt64("userid"))
 	if err != nil {
 		if user_model.IsErrUserNotExist(err) {
-			ctx.Redirect(setting.AppSubURL + "/admin/users")
+			ctx.Redirect(setting.AppSubURL + "/-/admin/users")
 		} else {
 			ctx.ServerError("GetUserByID", err)
 		}
@@ -274,7 +266,7 @@ func ViewUser(ctx *context.Context) {
 		return
 	}
 
-	repos, count, err := repo_model.SearchRepository(ctx, &repo_model.SearchRepoOptions{
+	repos, count, err := repo_model.SearchRepository(ctx, repo_model.SearchRepoOptions{
 		ListOptions: db.ListOptionsAll,
 		OwnerID:     u.ID,
 		OrderBy:     db.SearchOrderByAlphabetically,
@@ -298,9 +290,9 @@ func ViewUser(ctx *context.Context) {
 	ctx.Data["EmailsTotal"] = len(emails)
 
 	orgs, err := db.Find[org_model.Organization](ctx, org_model.FindOrgOptions{
-		ListOptions:    db.ListOptionsAll,
-		UserID:         u.ID,
-		IncludePrivate: true,
+		ListOptions:       db.ListOptionsAll,
+		UserID:            u.ID,
+		IncludeVisibility: structs.VisibleTypePrivate,
 	})
 	if err != nil {
 		ctx.ServerError("FindOrgs", err)
@@ -318,6 +310,8 @@ func editUserCommon(ctx *context.Context) {
 	ctx.Data["PageIsAdminUsers"] = true
 	ctx.Data["DisableRegularOrgCreation"] = setting.Admin.DisableRegularOrgCreation
 	ctx.Data["DisableMigrations"] = setting.Repository.DisableMigrations
+	ctx.Data["DisableGitHooks"] = setting.DisableGitHooks
+	ctx.Data["DisableImportLocal"] = !setting.ImportLocalPaths
 	ctx.Data["AllowedUserVisibilityModes"] = setting.Service.AllowedUserVisibilityModesSlice.ToVisibleTypeSlice()
 	ctx.Data["DisableGravatar"] = setting.Config().Picture.DisableGravatar.Value(ctx)
 }
@@ -348,23 +342,23 @@ func EditUserPost(ctx *context.Context) {
 	}
 
 	if form.UserName != "" {
-		if err := user_service.RenameUser(ctx, u, form.UserName); err != nil {
+		if err := user_service.RenameUser(ctx, u, form.UserName, ctx.Doer); err != nil {
 			switch {
 			case user_model.IsErrUserIsNotLocal(err):
 				ctx.Data["Err_UserName"] = true
-				ctx.RenderWithErr(ctx.Tr("form.username_change_not_local_user"), tplUserEdit, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("form.username_change_not_local_user"), tplUserEdit, &form)
 			case user_model.IsErrUserAlreadyExist(err):
 				ctx.Data["Err_UserName"] = true
-				ctx.RenderWithErr(ctx.Tr("form.username_been_taken"), tplUserEdit, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("form.username_been_taken"), tplUserEdit, &form)
 			case db.IsErrNameReserved(err):
 				ctx.Data["Err_UserName"] = true
-				ctx.RenderWithErr(ctx.Tr("user.form.name_reserved", form.UserName), tplUserEdit, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("user.form.name_reserved", form.UserName), tplUserEdit, &form)
 			case db.IsErrNamePatternNotAllowed(err):
 				ctx.Data["Err_UserName"] = true
-				ctx.RenderWithErr(ctx.Tr("user.form.name_pattern_not_allowed", form.UserName), tplUserEdit, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("user.form.name_pattern_not_allowed", form.UserName), tplUserEdit, &form)
 			case db.IsErrNameCharsNotAllowed(err):
 				ctx.Data["Err_UserName"] = true
-				ctx.RenderWithErr(ctx.Tr("user.form.name_chars_not_allowed", form.UserName), tplUserEdit, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("user.form.name_chars_not_allowed", form.UserName), tplUserEdit, &form)
 			default:
 				ctx.ServerError("RenameUser", err)
 			}
@@ -395,16 +389,16 @@ func EditUserPost(ctx *context.Context) {
 		switch {
 		case errors.Is(err, password.ErrMinLength):
 			ctx.Data["Err_Password"] = true
-			ctx.RenderWithErr(ctx.Tr("auth.password_too_short", setting.MinPasswordLength), tplUserEdit, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("auth.password_too_short", setting.MinPasswordLength), tplUserEdit, &form)
 		case errors.Is(err, password.ErrComplexity):
 			ctx.Data["Err_Password"] = true
-			ctx.RenderWithErr(password.BuildComplexityError(ctx.Locale), tplUserEdit, &form)
+			ctx.RenderWithErrDeprecated(password.BuildComplexityError(ctx.Locale), tplUserEdit, &form)
 		case errors.Is(err, password.ErrIsPwned):
 			ctx.Data["Err_Password"] = true
-			ctx.RenderWithErr(ctx.Tr("auth.password_pwned"), tplUserEdit, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("auth.password_pwned", "https://haveibeenpwned.com/Passwords"), tplUserEdit, &form)
 		case password.IsErrIsPwnedRequest(err):
 			ctx.Data["Err_Password"] = true
-			ctx.RenderWithErr(ctx.Tr("auth.password_pwned_err"), tplUserEdit, &form)
+			ctx.RenderWithErrDeprecated(ctx.Tr("auth.password_pwned_err"), tplUserEdit, &form)
 		default:
 			ctx.ServerError("UpdateUser", err)
 		}
@@ -412,14 +406,14 @@ func EditUserPost(ctx *context.Context) {
 	}
 
 	if form.Email != "" {
-		if err := user_service.AdminAddOrSetPrimaryEmailAddress(ctx, u, form.Email); err != nil {
+		if err := user_service.ReplacePrimaryEmailAddress(ctx, u, form.Email); err != nil {
 			switch {
 			case user_model.IsErrEmailCharIsNotSupported(err), user_model.IsErrEmailInvalid(err):
 				ctx.Data["Err_Email"] = true
-				ctx.RenderWithErr(ctx.Tr("form.email_invalid"), tplUserEdit, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("form.email_invalid"), tplUserEdit, &form)
 			case user_model.IsErrEmailAlreadyUsed(err):
 				ctx.Data["Err_Email"] = true
-				ctx.RenderWithErr(ctx.Tr("form.email_been_used"), tplUserEdit, &form)
+				ctx.RenderWithErrDeprecated(ctx.Tr("form.email_been_used"), tplUserEdit, &form)
 			default:
 				ctx.ServerError("AddOrSetPrimaryEmailAddress", err)
 			}
@@ -435,7 +429,7 @@ func EditUserPost(ctx *context.Context) {
 		Website:                 optional.Some(form.Website),
 		Location:                optional.Some(form.Location),
 		IsActive:                optional.Some(form.Active),
-		IsAdmin:                 optional.Some(form.Admin),
+		IsAdmin:                 user_service.UpdateOptionFieldFromValue(form.Admin),
 		AllowGitHook:            optional.Some(form.AllowGitHook),
 		AllowImportLocal:        optional.Some(form.AllowImportLocal),
 		MaxRepoCreation:         optional.Some(form.MaxRepoCreation),
@@ -446,8 +440,8 @@ func EditUserPost(ctx *context.Context) {
 	}
 
 	if err := user_service.UpdateUser(ctx, u, opts); err != nil {
-		if models.IsErrDeleteLastAdminUser(err) {
-			ctx.RenderWithErr(ctx.Tr("auth.last_admin"), tplUserEdit, &form)
+		if user_model.IsErrDeleteLastAdminUser(err) {
+			ctx.RenderWithErrDeprecated(ctx.Tr("auth.last_admin"), tplUserEdit, &form)
 		} else {
 			ctx.ServerError("UpdateUser", err)
 		}
@@ -481,12 +475,12 @@ func EditUserPost(ctx *context.Context) {
 	}
 
 	ctx.Flash.Success(ctx.Tr("admin.users.update_profile_success"))
-	ctx.Redirect(setting.AppSubURL + "/admin/users/" + url.PathEscape(ctx.Params(":userid")))
+	ctx.Redirect(setting.AppSubURL + "/-/admin/users/" + url.PathEscape(ctx.PathParam("userid")))
 }
 
 // DeleteUser response for deleting a user
 func DeleteUser(ctx *context.Context) {
-	u, err := user_model.GetUserByID(ctx, ctx.ParamsInt64(":userid"))
+	u, err := user_model.GetUserByID(ctx, ctx.PathParamInt64("userid"))
 	if err != nil {
 		ctx.ServerError("GetUserByID", err)
 		return
@@ -495,24 +489,24 @@ func DeleteUser(ctx *context.Context) {
 	// admin should not delete themself
 	if u.ID == ctx.Doer.ID {
 		ctx.Flash.Error(ctx.Tr("admin.users.cannot_delete_self"))
-		ctx.Redirect(setting.AppSubURL + "/admin/users/" + url.PathEscape(ctx.Params(":userid")))
+		ctx.Redirect(setting.AppSubURL + "/-/admin/users/" + url.PathEscape(ctx.PathParam("userid")))
 		return
 	}
 
 	if err = user_service.DeleteUser(ctx, u, ctx.FormBool("purge")); err != nil {
 		switch {
-		case models.IsErrUserOwnRepos(err):
+		case repo_model.IsErrUserOwnRepos(err):
 			ctx.Flash.Error(ctx.Tr("admin.users.still_own_repo"))
-			ctx.Redirect(setting.AppSubURL + "/admin/users/" + url.PathEscape(ctx.Params(":userid")))
-		case models.IsErrUserHasOrgs(err):
+			ctx.Redirect(setting.AppSubURL + "/-/admin/users/" + url.PathEscape(ctx.PathParam("userid")))
+		case org_model.IsErrUserHasOrgs(err):
 			ctx.Flash.Error(ctx.Tr("admin.users.still_has_org"))
-			ctx.Redirect(setting.AppSubURL + "/admin/users/" + url.PathEscape(ctx.Params(":userid")))
-		case models.IsErrUserOwnPackages(err):
+			ctx.Redirect(setting.AppSubURL + "/-/admin/users/" + url.PathEscape(ctx.PathParam("userid")))
+		case packages_model.IsErrUserOwnPackages(err):
 			ctx.Flash.Error(ctx.Tr("admin.users.still_own_packages"))
-			ctx.Redirect(setting.AppSubURL + "/admin/users/" + url.PathEscape(ctx.Params(":userid")))
-		case models.IsErrDeleteLastAdminUser(err):
+			ctx.Redirect(setting.AppSubURL + "/-/admin/users/" + url.PathEscape(ctx.PathParam("userid")))
+		case user_model.IsErrDeleteLastAdminUser(err):
 			ctx.Flash.Error(ctx.Tr("auth.last_admin"))
-			ctx.Redirect(setting.AppSubURL + "/admin/users/" + url.PathEscape(ctx.Params(":userid")))
+			ctx.Redirect(setting.AppSubURL + "/-/admin/users/" + url.PathEscape(ctx.PathParam("userid")))
 		default:
 			ctx.ServerError("DeleteUser", err)
 		}
@@ -521,7 +515,7 @@ func DeleteUser(ctx *context.Context) {
 	log.Trace("Account deleted by admin (%s): %s", ctx.Doer.Name, u.Name)
 
 	ctx.Flash.Success(ctx.Tr("admin.users.deletion_success"))
-	ctx.Redirect(setting.AppSubURL + "/admin/users")
+	ctx.Redirect(setting.AppSubURL + "/-/admin/users")
 }
 
 // AvatarPost response for change user's avatar request
@@ -538,7 +532,7 @@ func AvatarPost(ctx *context.Context) {
 		ctx.Flash.Success(ctx.Tr("settings.update_user_avatar_success"))
 	}
 
-	ctx.Redirect(setting.AppSubURL + "/admin/users/" + strconv.FormatInt(u.ID, 10))
+	ctx.Redirect(setting.AppSubURL + "/-/admin/users/" + strconv.FormatInt(u.ID, 10))
 }
 
 // DeleteAvatar render delete avatar page
@@ -552,5 +546,5 @@ func DeleteAvatar(ctx *context.Context) {
 		ctx.Flash.Error(err.Error())
 	}
 
-	ctx.JSONRedirect(setting.AppSubURL + "/admin/users/" + strconv.FormatInt(u.ID, 10))
+	ctx.JSONRedirect(setting.AppSubURL + "/-/admin/users/" + strconv.FormatInt(u.ID, 10))
 }

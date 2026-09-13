@@ -9,14 +9,15 @@ import (
 	"net/http"
 	"strconv"
 
-	"code.gitea.io/gitea/models/db"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/json"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/private"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/services/context"
-	"code.gitea.io/gitea/services/mailer"
+	"gitea.dev/models/db"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/private"
+	"gitea.dev/modules/setting"
+	"gitea.dev/services/context"
+	"gitea.dev/services/mailer"
+	sender_service "gitea.dev/services/mailer/sender"
 )
 
 // SendEmail pushes messages to mail queue
@@ -81,7 +82,7 @@ func SendEmail(ctx *context.PrivateContext) {
 
 func sendEmail(ctx *context.PrivateContext, subject, message string, to []string) {
 	for _, email := range to {
-		msg := mailer.NewMessage(email, subject, message)
+		msg := sender_service.NewMessage(email, subject, message)
 		mailer.SendAsync(msg)
 	}
 

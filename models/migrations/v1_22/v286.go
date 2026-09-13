@@ -1,18 +1,19 @@
 // Copyright 2023 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
-package v1_22 //nolint
+package v1_22
 
 import (
 	"errors"
 	"fmt"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 
 	"xorm.io/xorm"
 )
 
-func expandHashReferencesToSha256(x *xorm.Engine) error {
+func expandHashReferencesToSha256(x db.EngineMigration) error {
 	alteredTables := [][2]string{
 		{"commit_status", "context_hash"},
 		{"comment", "commit_sha"},
@@ -81,22 +82,25 @@ func expandHashReferencesToSha256(x *xorm.Engine) error {
 	return db.Commit()
 }
 
-func addObjectFormatNameToRepository(x *xorm.Engine) error {
+func addObjectFormatNameToRepository(x db.EngineMigration) error {
 	type Repository struct {
 		ObjectFormatName string `xorm:"VARCHAR(6) NOT NULL DEFAULT 'sha1'"`
 	}
 
-	if err := x.Sync(new(Repository)); err != nil {
+	if _, err := x.SyncWithOptions(xorm.SyncOptions{
+		IgnoreIndices:    true,
+		IgnoreConstrains: true,
+	}, new(Repository)); err != nil {
 		return err
 	}
 
 	// Here to catch weird edge-cases where column constraints above are
 	// not applied by the DB backend
-	_, err := x.Exec("UPDATE repository set object_format_name = 'sha1' WHERE object_format_name = '' or object_format_name IS NULL")
+	_, err := x.Exec("UPDATE `repository` set `object_format_name` = 'sha1' WHERE `object_format_name` = '' or `object_format_name` IS NULL")
 	return err
 }
 
-func AdjustDBForSha256(x *xorm.Engine) error {
+func AdjustDBForSha256(x db.EngineMigration) error {
 	if err := expandHashReferencesToSha256(x); err != nil {
 		return err
 	}

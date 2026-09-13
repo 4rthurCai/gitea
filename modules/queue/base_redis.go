@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"code.gitea.io/gitea/modules/graceful"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/nosql"
+	"gitea.dev/modules/graceful"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/nosql"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -29,7 +29,7 @@ func newBaseRedisGeneric(cfg *BaseConfig, unique bool) (baseQueue, error) {
 	client := nosql.GetManager().GetRedisClient(cfg.ConnStr)
 
 	var err error
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		err = client.Ping(graceful.GetManager().ShutdownContext()).Err()
 		if err == nil {
 			break

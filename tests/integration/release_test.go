@@ -7,14 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/models/unittest"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/test"
-	"code.gitea.io/gitea/modules/translation"
-	"code.gitea.io/gitea/tests"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/test"
+	"gitea.dev/modules/translation"
+	"gitea.dev/tests"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/stretchr/testify/assert"
@@ -29,7 +29,6 @@ func createNewRelease(t *testing.T, session *TestSession, repoURL, tag, title st
 	assert.True(t, exists, "The template has changed")
 
 	postData := map[string]string{
-		"_csrf":      htmlDoc.GetCSRF(),
 		"tag_name":   tag,
 		"tag_target": "master",
 		"title":      title,
@@ -39,13 +38,12 @@ func createNewRelease(t *testing.T, session *TestSession, repoURL, tag, title st
 		postData["prerelease"] = "on"
 	}
 	if draft {
-		postData["draft"] = "Save Draft"
+		postData["draft"] = "1"
 	}
+
 	req = NewRequestWithValues(t, "POST", link, postData)
-
-	resp = session.MakeRequest(t, req, http.StatusSeeOther)
-
-	test.RedirectURL(resp) // check that redirect URL exists
+	resp = session.MakeRequest(t, req, http.StatusOK)
+	assert.NotEmpty(t, test.ParseJSONRedirect(resp.Body.Bytes()))
 }
 
 func checkLatestReleaseAndCount(t *testing.T, session *TestSession, repoURL, version, label string, count int) {
@@ -54,12 +52,12 @@ func checkLatestReleaseAndCount(t *testing.T, session *TestSession, repoURL, ver
 
 	htmlDoc := NewHTMLParser(t, resp.Body)
 	labelText := htmlDoc.doc.Find("#release-list > li .detail .label").First().Text()
-	assert.EqualValues(t, label, labelText)
+	assert.Equal(t, label, labelText)
 	titleText := htmlDoc.doc.Find("#release-list > li .detail h4 a").First().Text()
-	assert.EqualValues(t, version, titleText)
+	assert.Equal(t, version, titleText)
 
 	releaseList := htmlDoc.doc.Find("#release-list > li")
-	assert.EqualValues(t, count, releaseList.Length())
+	assert.Equal(t, count, releaseList.Length())
 }
 
 func TestViewReleases(t *testing.T) {
@@ -68,9 +66,6 @@ func TestViewReleases(t *testing.T) {
 	session := loginUser(t, "user2")
 	req := NewRequest(t, "GET", "/user2/repo1/releases")
 	session.MakeRequest(t, req, http.StatusOK)
-
-	// if CI is to slow this test fail, so lets wait a bit
-	time.Sleep(time.Millisecond * 100)
 }
 
 func TestViewReleasesNoLogin(t *testing.T) {
@@ -109,16 +104,10 @@ func TestCreateReleaseDraft(t *testing.T) {
 
 func TestCreateReleasePaging(t *testing.T) {
 	defer tests.PrepareTestEnv(t)()
-
-	oldAPIDefaultNum := setting.API.DefaultPagingNum
-	defer func() {
-		setting.API.DefaultPagingNum = oldAPIDefaultNum
-	}()
-	setting.API.DefaultPagingNum = 10
-
+	defer test.MockVariableValue(&setting.API.DefaultPagingNum, 10)()
 	session := loginUser(t, "user2")
 	// Create enough releases to have paging
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		version := fmt.Sprintf("v0.0.%d", i)
 		createNewRelease(t, session, "/user2/repo1", version, version, false, false)
 	}
@@ -157,14 +146,14 @@ func TestViewReleaseListNoLogin(t *testing.T) {
 		commitsToMain = append(commitsToMain, s.Find(".ahead > a").Text())
 	})
 
-	assert.EqualValues(t, []string{
+	assert.Equal(t, []string{
 		"/user2/repo-release/releases/tag/empty-target-branch",
 		"/user2/repo-release/releases/tag/non-existing-target-branch",
 		"/user2/repo-release/releases/tag/v2.0",
 		"/user2/repo-release/releases/tag/v1.1",
 		"/user2/repo-release/releases/tag/v1.0",
 	}, links)
-	assert.EqualValues(t, []string{
+	assert.Equal(t, []string{
 		"1 commits", // like v1.1
 		"1 commits", // like v1.1
 		"0 commits",
@@ -173,17 +162,25 @@ func TestViewReleaseListNoLogin(t *testing.T) {
 	}, commitsToMain)
 }
 
-func TestViewSingleReleaseNoLogin(t *testing.T) {
+func TestViewSingleRelease(t *testing.T) {
 	defer tests.PrepareTestEnv(t)()
 
-	req := NewRequest(t, "GET", "/user2/repo-release/releases/tag/v1.0")
-	resp := MakeRequest(t, req, http.StatusOK)
-
-	htmlDoc := NewHTMLParser(t, resp.Body)
-	// check the "number of commits to main since this release"
-	releaseList := htmlDoc.doc.Find("#release-list .ahead > a")
-	assert.EqualValues(t, 1, releaseList.Length())
-	assert.EqualValues(t, "3 commits", releaseList.First().Text())
+	t.Run("NoLogin", func(t *testing.T) {
+		req := NewRequest(t, "GET", "/user2/repo-release/releases/tag/v1.0")
+		resp := MakeRequest(t, req, http.StatusOK)
+		htmlDoc := NewHTMLParser(t, resp.Body)
+		// check the "number of commits to main since this release"
+		releaseList := htmlDoc.doc.Find("#release-list .ahead > a")
+		assert.Equal(t, 1, releaseList.Length())
+		assert.Equal(t, "3 commits", releaseList.First().Text())
+	})
+	t.Run("Login", func(t *testing.T) {
+		session := loginUser(t, "user1")
+		req := NewRequest(t, "GET", "/user2/repo1/releases/tag/delete-tag") // "delete-tag" is the only one with is_tag=true (although strange name)
+		resp := session.MakeRequest(t, req, http.StatusOK)
+		// the New Release button should contain the tag name
+		assert.Contains(t, resp.Body.String(), `<a class="ui small primary button" href="/user2/repo1/releases/new?tag=delete-tag">`)
+	})
 }
 
 func TestViewReleaseListLogin(t *testing.T) {
@@ -210,7 +207,7 @@ func TestViewReleaseListLogin(t *testing.T) {
 		links = append(links, link)
 	})
 
-	assert.EqualValues(t, []string{
+	assert.Equal(t, []string{
 		"/user2/repo1/releases/tag/draft-release",
 		"/user2/repo1/releases/tag/v1.0",
 		"/user2/repo1/releases/tag/v1.1",
@@ -237,7 +234,7 @@ func TestViewTagsList(t *testing.T) {
 		tagNames = append(tagNames, s.Text())
 	})
 
-	assert.EqualValues(t, []string{"v1.0", "delete-tag", "v1.1"}, tagNames)
+	assert.Equal(t, []string{"v1.0", "delete-tag", "v1.1"}, tagNames)
 }
 
 func TestDownloadReleaseAttachment(t *testing.T) {
@@ -255,4 +252,28 @@ func TestDownloadReleaseAttachment(t *testing.T) {
 	req = NewRequest(t, "GET", url)
 	session := loginUser(t, "user2")
 	session.MakeRequest(t, req, http.StatusOK)
+}
+
+func TestEditReleaseAttachmentRejectsForbiddenRename(t *testing.T) {
+	defer tests.PrepareTestEnv(t)()
+	defer test.MockVariableValue(&setting.Repository.Release.AllowedTypes, ".zip")()
+
+	attachment := unittest.AssertExistsAndLoadBean(t, &repo_model.Attachment{ID: 9})
+	release := unittest.AssertExistsAndLoadBean(t, &repo_model.Release{ID: attachment.ReleaseID})
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: attachment.RepoID})
+	repoOwner := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: repo.OwnerID})
+
+	session := loginUser(t, repoOwner.Name)
+	req := NewRequestWithValues(t, "POST", fmt.Sprintf("%s/releases/edit/%s", repo.Link(), release.TagName), map[string]string{
+		"title":                              release.Title,
+		"content":                            release.Note,
+		"attachment-edit-" + attachment.UUID: "evil.exe",
+	})
+
+	resp := session.MakeRequest(t, req, http.StatusBadRequest)
+	errMsg := test.ParseJSONError(resp.Body.Bytes()).ErrorMessage
+	assert.Equal(t, "This file cannot be uploaded or modified due to a forbidden file extension or type.", errMsg)
+
+	attachment = unittest.AssertExistsAndLoadBean(t, &repo_model.Attachment{ID: attachment.ID})
+	assert.NotEqual(t, "evil.exe", attachment.Name)
 }

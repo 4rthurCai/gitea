@@ -1,18 +1,18 @@
 // Copyright 2023 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_22 //nolint
+package v1_22
 
 import (
 	"testing"
 
-	"code.gitea.io/gitea/models/migrations/base"
+	"gitea.dev/models/db"
+	"gitea.dev/models/migrations/migrationtest"
 
 	"github.com/stretchr/testify/assert"
-	"xorm.io/xorm"
 )
 
-func PrepareOldRepository(t *testing.T) (*xorm.Engine, func()) {
+func PrepareOldRepository(t *testing.T) (db.EngineMigration, func()) {
 	type Repository struct { // old struct
 		ID int64 `xorm:"pk autoincr"`
 	}
@@ -64,7 +64,7 @@ func PrepareOldRepository(t *testing.T) (*xorm.Engine, func()) {
 	}
 
 	// Prepare and load the testing database
-	return base.PrepareTestEnv(t, 0,
+	return migrationtest.PrepareTestEnv(t, 0,
 		new(Repository),
 		new(CommitStatus),
 		new(RepoArchiver),
@@ -107,12 +107,12 @@ func Test_RepositoryFormat(t *testing.T) {
 	repo = new(Repository)
 	ok, err := x.ID(2).Get(repo)
 	assert.NoError(t, err)
-	assert.EqualValues(t, true, ok)
-	assert.EqualValues(t, "sha1", repo.ObjectFormatName)
+	assert.True(t, ok)
+	assert.Equal(t, "sha1", repo.ObjectFormatName)
 
 	repo = new(Repository)
 	ok, err = x.ID(id).Get(repo)
 	assert.NoError(t, err)
-	assert.EqualValues(t, true, ok)
-	assert.EqualValues(t, "sha256", repo.ObjectFormatName)
+	assert.True(t, ok)
+	assert.Equal(t, "sha256", repo.ObjectFormatName)
 }

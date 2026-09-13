@@ -10,38 +10,36 @@ import (
 	"strings"
 	"time"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/models/organization"
-	packages_model "code.gitea.io/gitea/models/packages"
-	repo_model "code.gitea.io/gitea/models/repo"
-	system_model "code.gitea.io/gitea/models/system"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/eventsource"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/storage"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/services/agit"
-	asymkey_service "code.gitea.io/gitea/services/asymkey"
-	org_service "code.gitea.io/gitea/services/org"
-	"code.gitea.io/gitea/services/packages"
-	container_service "code.gitea.io/gitea/services/packages/container"
-	repo_service "code.gitea.io/gitea/services/repository"
+	"gitea.dev/models/db"
+	"gitea.dev/models/organization"
+	packages_model "gitea.dev/models/packages"
+	repo_model "gitea.dev/models/repo"
+	system_model "gitea.dev/models/system"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/eventsource"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/storage"
+	"gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
+	"gitea.dev/services/agit"
+	asymkey_service "gitea.dev/services/asymkey"
+	org_service "gitea.dev/services/org"
+	"gitea.dev/services/packages"
+	container_service "gitea.dev/services/packages/container"
+	repo_service "gitea.dev/services/repository"
 )
 
 // RenameUser renames a user
-func RenameUser(ctx context.Context, u *user_model.User, newUserName string) error {
-	// Non-local users are not allowed to change their username.
-	if !u.IsOrganization() && !u.IsLocal() {
-		return user_model.ErrUserIsNotLocal{
-			UID:  u.ID,
-			Name: u.Name,
-		}
-	}
-
+func RenameUser(ctx context.Context, u *user_model.User, newUserName string, doer *user_model.User) error {
 	if newUserName == u.Name {
 		return nil
+	}
+
+	// Non-local users are not allowed to change their own username, but admins are
+	isExternalUser := !u.IsOrganization() && !u.IsLocal()
+	if isExternalUser && !doer.IsAdmin {
+		return user_model.ErrUserIsNotLocal{UID: u.ID, Name: u.Name}
 	}
 
 	if err := user_model.IsUsableUsername(newUserName); err != nil {
@@ -110,7 +108,7 @@ func RenameUser(ctx context.Context, u *user_model.User, newUserName string) err
 		u.Name = oldUserName
 		u.LowerName = strings.ToLower(oldUserName)
 		if err2 := util.Rename(user_model.UserPath(newUserName), user_model.UserPath(oldUserName)); err2 != nil && !os.IsNotExist(err2) {
-			log.Critical("Unable to rollback directory change during failed username change from: %s to: %s. DB Error: %v. Filesystem Error: %v", oldUserName, newUserName, err, err2)
+			log.Error("Unable to rollback directory change during failed username change from: %s to: %s. DB Error: %v. Filesystem Error: %v", oldUserName, newUserName, err, err2)
 			return fmt.Errorf("failed to rollback directory change during failed username change from: %s to: %s. DB Error: %w. Filesystem Error: %v", oldUserName, newUserName, err, err2)
 		}
 		return err
@@ -127,7 +125,7 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 	}
 
 	if u.IsActive && user_model.IsLastAdminUser(ctx, u) {
-		return models.ErrDeleteLastAdminUser{UID: u.ID}
+		return user_model.ErrDeleteLastAdminUser{UID: u.ID}
 	}
 
 	if purge {
@@ -178,8 +176,8 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 					PageSize: repo_model.RepositoryListDefaultPageSize,
 					Page:     1,
 				},
-				UserID:         u.ID,
-				IncludePrivate: true,
+				UserID:            u.ID,
+				IncludeVisibility: structs.VisibleTypePrivate,
 			})
 			if err != nil {
 				return fmt.Errorf("unable to find org list for %s[%d]. Error: %w", u.Name, u.ID, err)
@@ -188,7 +186,7 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 				break
 			}
 			for _, org := range orgs {
-				if err := models.RemoveOrgUser(ctx, org, u); err != nil {
+				if err := org_service.RemoveOrgUser(ctx, org, u); err != nil {
 					if organization.IsErrLastOrgOwner(err) {
 						err = org_service.DeleteOrganization(ctx, org, true)
 						if err != nil {
@@ -210,70 +208,82 @@ func DeleteUser(ctx context.Context, u *user_model.User, purge bool) error {
 		}
 	}
 
-	ctx, committer, err := db.TxContext(ctx)
-	if err != nil {
+	if err := db.WithTx(ctx, func(ctx context.Context) error {
+		// Note: A user owns any repository or belongs to any organization
+		//	cannot perform delete operation. This causes a race with the purge above
+		//  however consistency requires that we ensure that this is the case
+
+		// Check ownership of repository.
+		count, err := repo_model.CountRepositories(ctx, repo_model.CountRepositoryOptions{OwnerID: u.ID})
+		if err != nil {
+			return fmt.Errorf("GetRepositoryCount: %w", err)
+		} else if count > 0 {
+			return repo_model.ErrUserOwnRepos{UID: u.ID}
+		}
+
+		// Check membership of organization.
+		count, err = organization.GetOrganizationCount(ctx, u)
+		if err != nil {
+			return fmt.Errorf("GetOrganizationCount: %w", err)
+		} else if count > 0 {
+			return organization.ErrUserHasOrgs{UID: u.ID}
+		}
+
+		// Check ownership of packages.
+		if ownsPackages, err := packages_model.HasOwnerPackages(ctx, u.ID); err != nil {
+			return fmt.Errorf("HasOwnerPackages: %w", err)
+		} else if ownsPackages {
+			return packages_model.ErrUserOwnPackages{UID: u.ID}
+		}
+
+		if err := deleteUser(ctx, u, purge); err != nil {
+			return fmt.Errorf("DeleteUser: %w", err)
+		}
+
+		// Finally delete any unlinked attachments, this will also delete the attached files
+		if err := deleteUserUnlinkedAttachments(ctx, u); err != nil {
+			return fmt.Errorf("deleteUserUnlinkedAttachments: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	defer committer.Close()
 
-	// Note: A user owns any repository or belongs to any organization
-	//	cannot perform delete operation. This causes a race with the purge above
-	//  however consistency requires that we ensure that this is the case
-
-	// Check ownership of repository.
-	count, err := repo_model.CountRepositories(ctx, repo_model.CountRepositoryOptions{OwnerID: u.ID})
-	if err != nil {
-		return fmt.Errorf("GetRepositoryCount: %w", err)
-	} else if count > 0 {
-		return models.ErrUserOwnRepos{UID: u.ID}
-	}
-
-	// Check membership of organization.
-	count, err = organization.GetOrganizationCount(ctx, u)
-	if err != nil {
-		return fmt.Errorf("GetOrganizationCount: %w", err)
-	} else if count > 0 {
-		return models.ErrUserHasOrgs{UID: u.ID}
-	}
-
-	// Check ownership of packages.
-	if ownsPackages, err := packages_model.HasOwnerPackages(ctx, u.ID); err != nil {
-		return fmt.Errorf("HasOwnerPackages: %w", err)
-	} else if ownsPackages {
-		return models.ErrUserOwnPackages{UID: u.ID}
-	}
-
-	if err := deleteUser(ctx, u, purge); err != nil {
-		return fmt.Errorf("DeleteUser: %w", err)
-	}
-
-	if err := committer.Commit(); err != nil {
+	if err := asymkey_service.RewriteAllPublicKeys(ctx); err != nil {
 		return err
 	}
-	_ = committer.Close()
-
-	if err = asymkey_service.RewriteAllPublicKeys(ctx); err != nil {
-		return err
-	}
-	if err = asymkey_service.RewriteAllPrincipalKeys(ctx); err != nil {
+	if err := asymkey_service.RewriteAllPrincipalKeys(ctx); err != nil {
 		return err
 	}
 
 	// Note: There are something just cannot be roll back, so just keep error logs of those operations.
 	path := user_model.UserPath(u.Name)
-	if err = util.RemoveAll(path); err != nil {
+	if err := util.RemoveAll(path); err != nil {
 		err = fmt.Errorf("failed to RemoveAll %s: %w", path, err)
 		_ = system_model.CreateNotice(ctx, system_model.NoticeTask, fmt.Sprintf("delete user '%s': %v", u.Name, err))
 	}
 
 	if u.Avatar != "" {
 		avatarPath := u.CustomAvatarRelativePath()
-		if err = storage.Avatars.Delete(avatarPath); err != nil {
+		if err := storage.Avatars.Delete(avatarPath); err != nil {
 			err = fmt.Errorf("failed to remove %s: %w", avatarPath, err)
 			_ = system_model.CreateNotice(ctx, system_model.NoticeTask, fmt.Sprintf("delete user '%s': %v", u.Name, err))
 		}
 	}
 
+	return nil
+}
+
+func deleteUserUnlinkedAttachments(ctx context.Context, u *user_model.User) error {
+	attachments, err := repo_model.GetUnlinkedAttachmentsByUserID(ctx, u.ID)
+	if err != nil {
+		return fmt.Errorf("GetUnlinkedAttachmentsByUserID: %w", err)
+	}
+	for _, attach := range attachments {
+		if err := repo_model.DeleteAttachment(ctx, attach, true); err != nil {
+			return fmt.Errorf("DeleteAttachment ID[%d]: %w", attach.ID, err)
+		}
+	}
 	return nil
 }
 
@@ -288,7 +298,8 @@ func DeleteInactiveUsers(ctx context.Context, olderThan time.Duration) error {
 	for _, u := range inactiveUsers {
 		if err = DeleteUser(ctx, u, false); err != nil {
 			// Ignore inactive users that were ever active but then were set inactive by admin
-			if models.IsErrUserOwnRepos(err) || models.IsErrUserHasOrgs(err) || models.IsErrUserOwnPackages(err) {
+			if repo_model.IsErrUserOwnRepos(err) || organization.IsErrUserHasOrgs(err) || packages_model.IsErrUserOwnPackages(err) {
+				log.Warn("Inactive user %q has repositories, organizations or packages, skipping deletion: %v", u.Name, err)
 				continue
 			}
 			select {

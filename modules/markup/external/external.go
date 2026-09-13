@@ -5,27 +5,56 @@ package external
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 
-	"code.gitea.io/gitea/modules/graceful"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/markup"
-	"code.gitea.io/gitea/modules/process"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/markup"
+	"gitea.dev/modules/process"
+	"gitea.dev/modules/setting"
+
+	"github.com/kballard/go-shellquote"
 )
 
 // RegisterRenderers registers all supported third part renderers according settings
 func RegisterRenderers() {
+	markup.RegisterRenderer(&frontendRenderer{
+		name: "openapi-swagger",
+		patterns: []string{
+			"openapi.yaml",
+			"openapi.yml",
+			"openapi.json",
+			"swagger.yaml",
+			"swagger.yml",
+			"swagger.json",
+		},
+	})
+
+	markup.RegisterRenderer(&frontendRenderer{
+		name: "viewer-3d",
+		patterns: []string{
+			// It needs more logic to make it overall right (render a text 3D model automatically):
+			// we need to distinguish the ambiguous filename extensions.
+			// For example: "*.amf, *.obj, *.off, *.step" might be or not be a 3D model file.
+			// So when it is a text file, we can't assume that "we only render it by 3D plugin",
+			// otherwise the end users would be impossible to view its real content when the file is not a 3D model.
+			"*.3dm", "*.3ds", "*.3mf", "*.amf", "*.bim", "*.brep",
+			"*.dae", "*.fbx", "*.fcstd", "*.glb", "*.gltf",
+			"*.ifc", "*.igs", "*.iges", "*.stp", "*.step",
+			"*.stl", "*.obj", "*.off", "*.ply", "*.wrl",
+		},
+	})
+
+	markup.RegisterRenderer(&frontendRenderer{
+		name:     "asciicast",
+		patterns: []string{"*.cast"},
+	})
+
 	for _, renderer := range setting.ExternalMarkupRenderers {
-		if renderer.Enabled && renderer.Command != "" && len(renderer.FileExtensions) > 0 {
-			markup.RegisterRenderer(&Renderer{renderer})
-		}
+		markup.RegisterRenderer(&Renderer{renderer})
 	}
 }
 
@@ -39,97 +68,90 @@ var (
 	_ markup.ExternalRenderer    = (*Renderer)(nil)
 )
 
-// Name returns the external tool name
 func (p *Renderer) Name() string {
 	return p.MarkupName
 }
 
-// NeedPostProcess implements markup.Renderer
 func (p *Renderer) NeedPostProcess() bool {
 	return p.MarkupRenderer.NeedPostProcess
 }
 
-// Extensions returns the supported extensions of the tool
-func (p *Renderer) Extensions() []string {
-	return p.FileExtensions
+func (p *Renderer) FileNamePatterns() []string {
+	return p.FilePatterns
 }
 
-// SanitizerRules implements markup.Renderer
 func (p *Renderer) SanitizerRules() []setting.MarkupSanitizerRule {
 	return p.MarkupSanitizerRules
 }
 
-// SanitizerDisabled disabled sanitize if return true
-func (p *Renderer) SanitizerDisabled() bool {
-	return p.RenderContentMode == setting.RenderContentModeNoSanitizer || p.RenderContentMode == setting.RenderContentModeIframe
+func (p *Renderer) GetExternalRendererOptions() (ret markup.ExternalRendererOptions) {
+	ret.SanitizerDisabled = p.RenderContentMode == setting.RenderContentModeNoSanitizer || p.RenderContentMode == setting.RenderContentModeIframe
+	ret.DisplayInIframe = p.RenderContentMode == setting.RenderContentModeIframe
+	ret.ContentSandbox = p.RenderContentSandbox
+	return ret
 }
 
-// DisplayInIFrame represents whether render the content with an iframe
-func (p *Renderer) DisplayInIFrame() bool {
-	return p.RenderContentMode == setting.RenderContentModeIframe
-}
-
-func envMark(envName string) string {
-	if runtime.GOOS == "windows" {
-		return "%" + envName + "%"
+func (p *Renderer) prepareExternalCommand(vars map[string]string) (string, []string, error) {
+	fields, err := shellquote.Split(strings.TrimSpace(p.Command))
+	if err != nil {
+		return "", nil, err
 	}
-	return "$" + envName
+	if len(fields) == 0 {
+		return "", nil, errors.New("no command")
+	}
+	var replacements []string
+	for k, v := range vars {
+		replacements = append(replacements, "$"+k, v)
+		replacements = append(replacements, "%"+k+"%", v) // for legacy Windows-style support
+	}
+	r := strings.NewReplacer(replacements...)
+	for i := range fields {
+		fields[i] = r.Replace(fields[i])
+	}
+	return fields[0], fields[1:], nil
 }
 
 // Render renders the data of the document to HTML via the external tool.
 func (p *Renderer) Render(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
-	var (
-		command = strings.NewReplacer(
-			envMark("GITEA_PREFIX_SRC"), ctx.Links.SrcLink(),
-			envMark("GITEA_PREFIX_RAW"), ctx.Links.RawLink(),
-		).Replace(p.Command)
-		commands = strings.Fields(command)
-		args     = commands[1:]
-	)
-
+	baseLinkSrc := ctx.RenderHelper.ResolveLink("", markup.LinkTypeDefault)
+	baseLinkRaw := ctx.RenderHelper.ResolveLink("", markup.LinkTypeRaw)
+	cmdVars := map[string]string{
+		"GITEA_PREFIX_SRC": baseLinkSrc,
+		"GITEA_PREFIX_RAW": baseLinkRaw,
+	}
+	cmdProg, cmdArgs, err := p.prepareExternalCommand(cmdVars)
+	if err != nil {
+		return fmt.Errorf("invalid external render (%s) command %q: %w", p.Name(), p.Command, err)
+	}
 	if p.IsInputFile {
 		// write to temp file
-		f, err := os.CreateTemp("", "gitea_input")
+		tmpFile, cleanup, err := setting.AppDataTempDir("git-repo-content").CreateTempFileRandom("gitea_input")
 		if err != nil {
 			return fmt.Errorf("%s create temp file when rendering %s failed: %w", p.Name(), p.Command, err)
 		}
-		tmpPath := f.Name()
-		defer func() {
-			if err := util.Remove(tmpPath); err != nil {
-				log.Warn("Unable to remove temporary file: %s: Error: %v", tmpPath, err)
-			}
-		}()
+		defer cleanup()
 
-		_, err = io.Copy(f, input)
+		_, err = io.Copy(tmpFile, input)
 		if err != nil {
-			f.Close()
+			_ = tmpFile.Close()
 			return fmt.Errorf("%s write data to temp file when rendering %s failed: %w", p.Name(), p.Command, err)
 		}
 
-		err = f.Close()
+		err = tmpFile.Close()
 		if err != nil {
 			return fmt.Errorf("%s close temp file when rendering %s failed: %w", p.Name(), p.Command, err)
 		}
-		args = append(args, f.Name())
+		cmdArgs = append(cmdArgs, tmpFile.Name())
 	}
 
-	if ctx == nil || ctx.Ctx == nil {
-		if ctx == nil {
-			log.Warn("RenderContext not provided defaulting to empty ctx")
-			ctx = &markup.RenderContext{}
-		}
-		log.Warn("RenderContext did not provide context, defaulting to Shutdown context")
-		ctx.Ctx = graceful.GetManager().ShutdownContext()
-	}
-
-	processCtx, _, finished := process.GetManager().AddContext(ctx.Ctx, fmt.Sprintf("Render [%s] for %s", commands[0], ctx.Links.SrcLink()))
+	processCtx, _, finished := process.GetManager().AddContext(ctx, fmt.Sprintf("Render [%s] for %s", cmdProg, baseLinkSrc))
 	defer finished()
 
-	cmd := exec.CommandContext(processCtx, commands[0], args...)
+	cmd := exec.CommandContext(processCtx, cmdProg, cmdArgs...)
 	cmd.Env = append(
 		os.Environ(),
-		"GITEA_PREFIX_SRC="+ctx.Links.SrcLink(),
-		"GITEA_PREFIX_RAW="+ctx.Links.RawLink(),
+		"GITEA_PREFIX_SRC="+baseLinkSrc,
+		"GITEA_PREFIX_RAW="+baseLinkRaw,
 	)
 	if !p.IsInputFile {
 		cmd.Stdin = input
@@ -140,7 +162,7 @@ func (p *Renderer) Render(ctx *markup.RenderContext, input io.Reader, output io.
 	process.SetSysProcAttribute(cmd)
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s render run command %s %v failed: %w\nStderr: %s", p.Name(), commands[0], args, err, stderr.String())
+		return fmt.Errorf("%s render run command %s %v failed: %w\nStderr: %s", p.Name(), cmdProg, shellquote.Join(cmdArgs...), err, stderr.String())
 	}
 	return nil
 }

@@ -4,8 +4,8 @@
 package oauth2
 
 import (
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/services/auth/source/oauth2/providers/jaccount"
+	"gitea.dev/modules/setting"
+	"gitea.dev/services/auth/source/oauth2/providers/jaccount"
 
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/providers/azureadv2"
@@ -122,6 +122,7 @@ func init() {
 		},
 	))
 
+	RegisterGothProvider(&AwsCognitoProvider{})
 	RegisterGothProvider(NewCustomProvider(
 		"jaccount", "jAccount", &CustomURLSettings{
 			AuthURL:    requiredAttribute(jaccount.AuthURL),
@@ -132,3 +133,22 @@ func init() {
 			return jaccount.NewCustomisedURL(clientID, secret, callbackURL, custom.AuthURL, custom.TokenURL, custom.ProfileURL, scopes...), nil
 		}))
 }
+
+const ProviderNameAwsCognito = "aws-cognito"
+
+// AwsCognitoProvider is a GothProvider for AWS Cognito (based on OpenID Connect)
+type AwsCognitoProvider struct {
+	OpenIDProvider
+}
+
+// Name provides the technical name for this provider
+func (c *AwsCognitoProvider) Name() string {
+	return ProviderNameAwsCognito
+}
+
+// DisplayName returns the friendly name for this provider
+func (c *AwsCognitoProvider) DisplayName() string {
+	return "AWS Cognito"
+}
+
+var _ GothProvider = &AwsCognitoProvider{}

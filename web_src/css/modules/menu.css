@@ -1,5 +1,6 @@
 .ui.menu {
   display: flex;
+  flex-shrink: 0;
   margin: 1rem 0;
   font-family: var(--fonts-regular);
   font-weight: var(--font-weight-normal);
@@ -26,6 +27,7 @@
 .ui.menu:not(.vertical) .item {
   display: flex;
   align-items: center;
+  gap: var(--gap-inline);
 }
 
 .ui.menu .item {
@@ -172,24 +174,6 @@
   margin-top: 0.35714286em;
 }
 
-.ui.menu .pointing.dropdown.item .menu {
-  margin-top: 0.75em;
-}
-
-.ui.menu .item > .label:not(.floating) {
-  margin-left: 1em;
-  padding: 0.3em 0.78571429em;
-}
-.ui.vertical.menu .item > .label {
-  margin-top: -0.15em;
-  margin-bottom: -0.15em;
-  padding: 0.3em 0.78571429em;
-  float: right;
-  text-align: center;
-}
-.ui.menu .item > .floating.label {
-  padding: 0.3em 0.78571429em;
-}
 .ui.menu .item > .label {
   background: var(--color-label-bg);
   color: var(--color-label-text);
@@ -265,20 +249,10 @@
   display: inherit;
 }
 
-.ui.menu:not(.vertical) .center.item {
-  display: flex;
-  margin-left: auto !important;
-  margin-right: auto !important;
-}
-
 .ui.menu .right.item::before,
 .ui.menu .right.menu > .item::before {
   right: auto;
   left: 0;
-}
-
-.ui.menu .center.item:last-child::before {
-  display: none;
 }
 
 .ui.vertical.menu {
@@ -301,16 +275,6 @@
   border-radius: 0 0 0.28571429rem 0.28571429rem;
 }
 
-.ui.vertical.menu .item > i.icon {
-  width: 1.18em;
-  float: right;
-  margin: 0 0 0 0.5em;
-}
-.ui.vertical.menu .item > .label + i.icon {
-  float: none;
-  margin: 0 0.5em 0 0;
-}
-
 .ui.vertical.menu .item::before {
   position: absolute;
   content: "";
@@ -327,6 +291,7 @@
 .ui.vertical.menu .item > .menu {
   margin: 0.5em -1.14285714em 0;
 }
+
 .ui.vertical.menu .menu .item {
   background: none;
   padding: 0.5em 1.33333333em;
@@ -379,9 +344,6 @@
   border: none;
   background: none transparent;
   border-bottom: 1px solid var(--color-secondary);
-}
-.ui.tabular.fluid.menu {
-  width: calc(100% + 2px) !important;
 }
 .ui.tabular.menu .item {
   background: transparent;
@@ -522,14 +484,6 @@
   background: var(--color-active);
 }
 
-.ui.secondary.item.menu {
-  margin-left: 0;
-  margin-right: 0;
-}
-.ui.secondary.item.menu .item:last-child {
-  margin-right: 0;
-}
-
 .ui.vertical.secondary.menu .item:not(.dropdown) > .menu {
   margin: 0 -0.92857143em;
 }
@@ -556,13 +510,11 @@
   border-bottom: 2px solid var(--color-secondary);
 }
 .ui.secondary.pointing.menu .item {
-  border-bottom-color: transparent;
-  border-bottom-style: solid;
+  border-bottom: 2px solid transparent;
   border-radius: 0;
   align-self: flex-end;
   margin: 0 0 -2px;
   padding: 0.85714286em 1.14285714em;
-  border-bottom-width: 2px;
 }
 .ui.secondary.pointing.menu .ui.dropdown .menu .item {
   border-bottom-width: 0;
@@ -625,31 +577,14 @@
   .ui.stackable.menu .right.item {
     margin-left: 0 !important;
   }
-  .ui.stackable.menu .center.item {
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-  }
   .ui.stackable.menu .right.menu,
   .ui.stackable.menu .left.menu {
     flex-direction: column;
   }
 }
 
-.ui.floated.menu {
-  float: left;
-  margin: 0 0.5rem 0 0;
-}
-.ui.floated.menu .item:last-child::before {
-  display: none;
-}
-.ui.right.floated.menu {
-  float: right;
-  margin: 0 0 0 0.5rem;
-}
-
 .ui.borderless.menu .item::before,
-.ui.borderless.menu .item .menu .item::before,
-.ui.menu .borderless.item::before {
+.ui.borderless.menu .item .menu .item::before {
   background: none !important;
 }
 
@@ -657,19 +592,13 @@
   display: inline-flex;
   margin: 0;
   vertical-align: middle;
-}
-.ui.compact.vertical.menu {
-  display: inline-block;
-  width: auto !important;
+  flex-shrink: 0;
 }
 .ui.compact.menu:not(.secondary) .item:last-child {
   border-radius: 0 0.28571429rem 0.28571429rem 0;
 }
 .ui.compact.menu .item:last-child::before {
   display: none;
-}
-.ui.compact.vertical.menu .item:last-child::before {
-  display: block;
 }
 
 .ui.menu.fluid,
@@ -686,9 +615,6 @@
   margin-right: 0 !important;
   text-align: center;
   justify-content: center;
-}
-.ui.attached.item.menu:not(.tabular) {
-  margin: 0 -1px !important;
 }
 .ui.item.menu .item:last-child::before {
   display: none;

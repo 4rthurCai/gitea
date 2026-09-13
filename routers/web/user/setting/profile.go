@@ -14,31 +14,32 @@ import (
 	"path/filepath"
 	"strings"
 
-	"code.gitea.io/gitea/models/avatars"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/models/organization"
-	repo_model "code.gitea.io/gitea/models/repo"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/optional"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/translation"
-	"code.gitea.io/gitea/modules/typesniffer"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/modules/web"
-	"code.gitea.io/gitea/modules/web/middleware"
-	"code.gitea.io/gitea/services/context"
-	"code.gitea.io/gitea/services/forms"
-	user_service "code.gitea.io/gitea/services/user"
-	"code.gitea.io/gitea/services/webtheme"
+	"gitea.dev/models/avatars"
+	"gitea.dev/models/db"
+	"gitea.dev/models/organization"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/structs"
+	"gitea.dev/modules/templates"
+	"gitea.dev/modules/translation"
+	"gitea.dev/modules/typesniffer"
+	"gitea.dev/modules/util"
+	"gitea.dev/modules/web"
+	"gitea.dev/modules/web/middleware"
+	"gitea.dev/services/context"
+	"gitea.dev/services/forms"
+	user_service "gitea.dev/services/user"
+	"gitea.dev/services/webtheme"
 )
 
 const (
-	tplSettingsProfile      base.TplName = "user/settings/profile"
-	tplSettingsAppearance   base.TplName = "user/settings/appearance"
-	tplSettingsOrganization base.TplName = "user/settings/organization"
-	tplSettingsRepositories base.TplName = "user/settings/repos"
+	tplSettingsProfile      templates.TplName = "user/settings/profile"
+	tplSettingsAppearance   templates.TplName = "user/settings/appearance"
+	tplSettingsOrganization templates.TplName = "user/settings/organization"
+	tplSettingsRepositories templates.TplName = "user/settings/repos"
 )
 
 // Profile render user's profile page
@@ -53,7 +54,7 @@ func Profile(ctx *context.Context) {
 
 // ProfilePost response for change user's profile
 func ProfilePost(ctx *context.Context) {
-	ctx.Data["Title"] = ctx.Tr("settings")
+	ctx.Data["Title"] = ctx.Tr("settings_title")
 	ctx.Data["PageIsSettingsProfile"] = true
 	ctx.Data["AllowedUserVisibilityModes"] = setting.Service.AllowedUserVisibilityModesSlice.ToVisibleTypeSlice()
 	ctx.Data["DisableGravatar"] = setting.Config().Picture.DisableGravatar.Value(ctx)
@@ -66,7 +67,12 @@ func ProfilePost(ctx *context.Context) {
 	form := web.GetForm(ctx).(*forms.UpdateProfileForm)
 
 	if form.Name != "" {
-		if err := user_service.RenameUser(ctx, ctx.Doer, form.Name); err != nil {
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureChangeUsername) {
+			ctx.Flash.Error(ctx.Tr("user.form.change_username_disabled"))
+			ctx.Redirect(setting.AppSubURL + "/user/settings")
+			return
+		}
+		if err := user_service.RenameUser(ctx, ctx.Doer, form.Name, ctx.Doer); err != nil {
 			switch {
 			case user_model.IsErrUserIsNotLocal(err):
 				ctx.Flash.Error(ctx.Tr("form.username_change_not_local_user"))
@@ -88,7 +94,6 @@ func ProfilePost(ctx *context.Context) {
 	}
 
 	opts := &user_service.UpdateOptions{
-		FullName:            optional.Some(form.FullName),
 		KeepEmailPrivate:    optional.Some(form.KeepEmailPrivate),
 		Description:         optional.Some(form.Description),
 		Website:             optional.Some(form.Website),
@@ -96,6 +101,16 @@ func ProfilePost(ctx *context.Context) {
 		Visibility:          optional.Some(form.Visibility),
 		KeepActivityPrivate: optional.Some(form.KeepActivityPrivate),
 	}
+
+	if form.FullName != "" {
+		if user_model.IsFeatureDisabledWithLoginType(ctx.Doer, setting.UserFeatureChangeFullName) {
+			ctx.Flash.Error(ctx.Tr("user.form.change_full_name_disabled"))
+			ctx.Redirect(setting.AppSubURL + "/user/settings")
+			return
+		}
+		opts.FullName = optional.Some(form.FullName)
+	}
+
 	if err := user_service.UpdateUser(ctx, ctx.Doer, opts); err != nil {
 		ctx.ServerError("UpdateUser", err)
 		return
@@ -188,8 +203,8 @@ func Organization(ctx *context.Context) {
 			PageSize: setting.UI.Admin.UserPagingNum,
 			Page:     ctx.FormInt("page"),
 		},
-		UserID:         ctx.Doer.ID,
-		IncludePrivate: ctx.IsSigned,
+		UserID:            ctx.Doer.ID,
+		IncludeVisibility: structs.VisibleTypePrivate,
 	}
 
 	if opts.Page <= 0 {
@@ -203,8 +218,8 @@ func Organization(ctx *context.Context) {
 	}
 
 	ctx.Data["Orgs"] = orgs
-	pager := context.NewPagination(int(total), opts.PageSize, opts.Page, 5)
-	pager.SetDefaultParams(ctx)
+	pager := context.NewPagination(total, opts.PageSize, opts.Page, 5)
+	pager.AddParamFromRequest(ctx.Req)
 	ctx.Data["Page"] = pager
 	ctx.HTML(http.StatusOK, tplSettingsOrganization)
 }
@@ -224,13 +239,13 @@ func Repos(ctx *context.Context) {
 	if opts.Page <= 0 {
 		opts.Page = 1
 	}
-	start := (opts.Page - 1) * opts.PageSize
-	end := start + opts.PageSize
+	start := int64((opts.Page - 1) * opts.PageSize)
+	end := start + int64(opts.PageSize)
 
 	adoptOrDelete := ctx.IsUserSiteAdmin() || (setting.Repository.AllowAdoptionOfUnadoptedRepositories && setting.Repository.AllowDeleteOfUnadoptedRepositories)
 
 	ctxUser := ctx.Doer
-	count := 0
+	var count int64
 
 	if adoptOrDelete {
 		repoNames := make([]string, 0, setting.UI.Admin.UserPagingNum)
@@ -265,7 +280,7 @@ func Repos(ctx *context.Context) {
 			return
 		}
 
-		userRepos, _, err := repo_model.GetUserRepositories(ctx, &repo_model.SearchRepoOptions{
+		userRepos, _, err := repo_model.GetUserRepositories(ctx, repo_model.SearchRepoOptions{
 			Actor:   ctxUser,
 			Private: true,
 			ListOptions: db.ListOptions{
@@ -290,12 +305,12 @@ func Repos(ctx *context.Context) {
 		ctx.Data["Dirs"] = repoNames
 		ctx.Data["ReposMap"] = repos
 	} else {
-		repos, count64, err := repo_model.GetUserRepositories(ctx, &repo_model.SearchRepoOptions{Actor: ctxUser, Private: true, ListOptions: opts})
+		repos, reposCount, err := repo_model.GetUserRepositories(ctx, repo_model.SearchRepoOptions{Actor: ctxUser, Private: true, ListOptions: opts})
 		if err != nil {
 			ctx.ServerError("GetUserRepositories", err)
 			return
 		}
-		count = int(count64)
+		count = reposCount
 
 		for i := range repos {
 			if repos[i].IsFork {
@@ -310,7 +325,7 @@ func Repos(ctx *context.Context) {
 	}
 	ctx.Data["ContextUser"] = ctxUser
 	pager := context.NewPagination(count, opts.PageSize, opts.Page, 5)
-	pager.SetDefaultParams(ctx)
+	pager.AddParamFromRequest(ctx.Req)
 	ctx.Data["Page"] = pager
 	ctx.HTML(http.StatusOK, tplSettingsRepositories)
 }
@@ -319,13 +334,7 @@ func Repos(ctx *context.Context) {
 func Appearance(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("settings.appearance")
 	ctx.Data["PageIsSettingsAppearance"] = true
-
-	allThemes := webtheme.GetAvailableThemes()
-	if webtheme.IsThemeAvailable(setting.UI.DefaultTheme) {
-		allThemes = util.SliceRemoveAll(allThemes, setting.UI.DefaultTheme)
-		allThemes = append([]string{setting.UI.DefaultTheme}, allThemes...) // move the default theme to the top
-	}
-	ctx.Data["AllThemes"] = allThemes
+	ctx.Data["AllThemes"] = webtheme.GetAvailableThemes()
 
 	var hiddenCommentTypes *big.Int
 	val, err := user_model.GetUserSetting(ctx, ctx.Doer.ID, user_model.SettingsKeyHiddenCommentTypes)
@@ -345,7 +354,7 @@ func Appearance(ctx *context.Context) {
 // UpdateUIThemePost is used to update users' specific theme
 func UpdateUIThemePost(ctx *context.Context) {
 	form := web.GetForm(ctx).(*forms.UpdateThemeForm)
-	ctx.Data["Title"] = ctx.Tr("settings")
+	ctx.Data["Title"] = ctx.Tr("settings_title")
 	ctx.Data["PageIsSettingsAppearance"] = true
 
 	if ctx.HasError() {
@@ -354,7 +363,7 @@ func UpdateUIThemePost(ctx *context.Context) {
 		return
 	}
 
-	if !webtheme.IsThemeAvailable(form.Theme) {
+	if webtheme.GetThemeMetaInfo(form.Theme) == nil {
 		ctx.Flash.Error(ctx.Tr("settings.theme_update_error"))
 		ctx.Redirect(setting.AppSubURL + "/user/settings/appearance")
 		return
@@ -375,7 +384,7 @@ func UpdateUIThemePost(ctx *context.Context) {
 // UpdateUserLang update a user's language
 func UpdateUserLang(ctx *context.Context) {
 	form := web.GetForm(ctx).(*forms.UpdateLanguageForm)
-	ctx.Data["Title"] = ctx.Tr("settings")
+	ctx.Data["Title"] = ctx.Tr("settings_title")
 	ctx.Data["PageIsSettingsAppearance"] = true
 
 	if form.Language != "" {

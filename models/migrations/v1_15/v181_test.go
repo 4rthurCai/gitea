@@ -1,13 +1,13 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_15 //nolint
+package v1_15
 
 import (
 	"strings"
 	"testing"
 
-	"code.gitea.io/gitea/models/migrations/base"
+	"gitea.dev/models/migrations/migrationtest"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -20,7 +20,7 @@ func Test_AddPrimaryEmail2EmailAddress(t *testing.T) {
 	}
 
 	// Prepare and load the testing database
-	x, deferable := base.PrepareTestEnv(t, 0, new(User))
+	x, deferable := migrationtest.PrepareTestEnv(t, 0, new(User))
 	if x == nil || t.Failed() {
 		defer deferable()
 		return
@@ -49,7 +49,7 @@ func Test_AddPrimaryEmail2EmailAddress(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, has)
 		assert.True(t, emailAddress.IsPrimary)
-		assert.EqualValues(t, user.IsActive, emailAddress.IsActivated)
-		assert.EqualValues(t, user.ID, emailAddress.UID)
+		assert.Equal(t, user.IsActive, emailAddress.IsActivated)
+		assert.Equal(t, user.ID, emailAddress.UID)
 	}
 }

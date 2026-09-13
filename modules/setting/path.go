@@ -10,7 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/tempdir"
 )
 
 var (
@@ -195,4 +196,25 @@ func InitWorkPathAndCfgProvider(getEnvFn func(name string) string, args ArgWorkP
 	AppWorkPath = tmpWorkPath.Value
 	CustomPath = tmpCustomPath.Value
 	CustomConf = tmpCustomConf.Value
+}
+
+func MockBuiltinPaths(workPath, customPath, customConf string) func() {
+	oldApp, oldCustom, oldConf := appWorkPathBuiltin, customPathBuiltin, customConfBuiltin
+	appWorkPathBuiltin, customPathBuiltin, customConfBuiltin = workPath, customPath, customConf
+	return func() { appWorkPathBuiltin, customPathBuiltin, customConfBuiltin = oldApp, oldCustom, oldConf }
+}
+
+// AppDataTempDir returns a managed temporary directory for the application data.
+// Using empty sub will get the managed base temp directory, and it's safe to delete it.
+// Gitea only creates subdirectories under it, but not the APP_TEMP_PATH directory itself.
+// * When APP_TEMP_PATH="/tmp": the managed temp directory is "/tmp/gitea-tmp"
+// * When APP_TEMP_PATH is not set: the managed temp directory is "/{APP_DATA_PATH}/tmp"
+func AppDataTempDir(sub string) *tempdir.TempDir {
+	if appTempPathInternal != "" {
+		return tempdir.New(appTempPathInternal, "gitea-tmp/"+sub)
+	}
+	if AppDataPath == "" {
+		panic("setting.AppDataPath is not set")
+	}
+	return tempdir.New(AppDataPath, "tmp/"+sub)
 }

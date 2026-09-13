@@ -1,21 +1,22 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_13 //nolint
+package v1_13
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 
-	"xorm.io/xorm"
 	"xorm.io/xorm/schemas"
 )
 
-func SetDefaultPasswordToArgon2(x *xorm.Engine) error {
+func SetDefaultPasswordToArgon2(x db.EngineMigration) error {
 	switch {
 	case setting.Database.Type.IsMySQL():
 		_, err := x.Exec("ALTER TABLE `user` ALTER passwd_hash_algo SET DEFAULT 'argon2';")
@@ -113,7 +114,7 @@ func SetDefaultPasswordToArgon2(x *xorm.Engine) error {
 
 	newTableColumns := table.Columns()
 	if len(newTableColumns) == 0 {
-		return fmt.Errorf("no columns in new table")
+		return errors.New("no columns in new table")
 	}
 	hasID := false
 	for _, column := range newTableColumns {

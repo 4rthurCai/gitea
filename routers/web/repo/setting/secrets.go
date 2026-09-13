@@ -7,18 +7,18 @@ import (
 	"errors"
 	"net/http"
 
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/setting"
-	shared "code.gitea.io/gitea/routers/web/shared/secrets"
-	shared_user "code.gitea.io/gitea/routers/web/shared/user"
-	"code.gitea.io/gitea/services/context"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/templates"
+	shared "gitea.dev/routers/web/shared/secrets"
+	shared_user "gitea.dev/routers/web/shared/user"
+	"gitea.dev/services/context"
 )
 
 const (
 	// TODO: Separate secrets from runners when layout is ready
-	tplRepoSecrets base.TplName = "repo/settings/actions"
-	tplOrgSecrets  base.TplName = "org/settings/actions"
-	tplUserSecrets base.TplName = "user/settings/actions"
+	tplRepoSecrets templates.TplName = "repo/settings/actions"
+	tplOrgSecrets  templates.TplName = "org/settings/actions"
+	tplUserSecrets templates.TplName = "user/settings/actions"
 )
 
 type secretsCtx struct {
@@ -27,7 +27,7 @@ type secretsCtx struct {
 	IsRepo          bool
 	IsOrg           bool
 	IsUser          bool
-	SecretsTemplate base.TplName
+	SecretsTemplate templates.TplName
 	RedirectLink    string
 }
 
@@ -43,10 +43,9 @@ func getSecretsCtx(ctx *context.Context) (*secretsCtx, error) {
 	}
 
 	if ctx.Data["PageIsOrgSettings"] == true {
-		err := shared_user.LoadHeaderCount(ctx)
-		if err != nil {
-			ctx.ServerError("LoadHeaderCount", err)
-			return nil, nil
+		if _, err := shared_user.RenderUserOrgHeader(ctx); err != nil {
+			ctx.ServerError("RenderUserOrgHeader", err)
+			return nil, nil //nolint:nilnil // error is already handled by ctx.ServerError
 		}
 		return &secretsCtx{
 			OwnerID:         ctx.ContextUser.ID,

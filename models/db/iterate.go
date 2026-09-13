@@ -6,12 +6,12 @@ package db
 import (
 	"context"
 
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/setting"
 
 	"xorm.io/builder"
 )
 
-// Iterate iterate all the Bean object
+// Iterate iterates all the Bean object
 func Iterate[Bean any](ctx context.Context, cond builder.Cond, f func(ctx context.Context, bean *Bean) error) error {
 	var start int
 	batchSize := setting.Database.IterateBufferSize

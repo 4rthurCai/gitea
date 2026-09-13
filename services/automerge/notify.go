@@ -6,10 +6,14 @@ package automerge
 import (
 	"context"
 
-	issues_model "code.gitea.io/gitea/models/issues"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/log"
-	notify_service "code.gitea.io/gitea/services/notify"
+	git_model "gitea.dev/models/git"
+	issues_model "gitea.dev/models/issues"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/repository"
+	"gitea.dev/services/automergequeue"
+	notify_service "gitea.dev/services/notify"
 )
 
 type automergeNotifier struct {
@@ -42,5 +46,13 @@ func (n *automergeNotifier) PullReviewDismiss(ctx context.Context, doer *user_mo
 		return
 	}
 	// as reviews could have blocked a pending automerge let's recheck
-	StartPRCheckAndAutoMerge(ctx, review.Issue.PullRequest)
+	automergequeue.StartPRCheckAndAutoMerge(ctx, review.Issue.PullRequest)
+}
+
+func (n *automergeNotifier) CreateCommitStatus(ctx context.Context, repo *repo_model.Repository, commit *repository.PushCommit, sender *user_model.User, status *git_model.CommitStatus) {
+	if status.State.IsSuccess() {
+		if err := StartPRCheckAndAutoMergeBySHA(ctx, commit.Sha1, repo); err != nil {
+			log.Error("MergeScheduledPullRequest[repo_id: %d, user_id: %d, sha: %s]: %w", repo.ID, sender.ID, commit.Sha1, err)
+		}
+	}
 }

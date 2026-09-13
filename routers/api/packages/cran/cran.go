@@ -11,35 +11,34 @@ import (
 	"net/http"
 	"strings"
 
-	packages_model "code.gitea.io/gitea/models/packages"
-	cran_model "code.gitea.io/gitea/models/packages/cran"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	cran_module "code.gitea.io/gitea/modules/packages/cran"
-	"code.gitea.io/gitea/modules/util"
-	"code.gitea.io/gitea/routers/api/packages/helper"
-	"code.gitea.io/gitea/services/context"
-	packages_service "code.gitea.io/gitea/services/packages"
+	packages_model "gitea.dev/models/packages"
+	cran_model "gitea.dev/models/packages/cran"
+	packages_module "gitea.dev/modules/packages"
+	cran_module "gitea.dev/modules/packages/cran"
+	"gitea.dev/modules/util"
+	"gitea.dev/routers/api/packages/helper"
+	"gitea.dev/services/context"
+	packages_service "gitea.dev/services/packages"
 )
 
 func apiError(ctx *context.Context, status int, obj any) {
-	helper.LogAndProcessError(ctx, status, obj, func(message string) {
-		ctx.PlainText(status, message)
-	})
+	message := helper.ProcessErrorForUser(ctx, status, obj)
+	ctx.PlainText(status, message)
 }
 
 func EnumerateSourcePackages(ctx *context.Context) {
-	enumeratePackages(ctx, ctx.Params("format"), &cran_model.SearchOptions{
+	enumeratePackages(ctx, ctx.PathParam("format"), &cran_model.SearchOptions{
 		OwnerID:  ctx.Package.Owner.ID,
 		FileType: cran_module.TypeSource,
 	})
 }
 
 func EnumerateBinaryPackages(ctx *context.Context) {
-	enumeratePackages(ctx, ctx.Params("format"), &cran_model.SearchOptions{
+	enumeratePackages(ctx, ctx.PathParam("format"), &cran_model.SearchOptions{
 		OwnerID:  ctx.Package.Owner.ID,
 		FileType: cran_module.TypeBinary,
-		Platform: ctx.Params("platform"),
-		RVersion: ctx.Params("rversion"),
+		Platform: ctx.PathParam("platform"),
+		RVersion: ctx.PathParam("rversion"),
 	})
 }
 
@@ -225,7 +224,7 @@ func DownloadSourcePackageFile(ctx *context.Context) {
 	downloadPackageFile(ctx, &cran_model.SearchOptions{
 		OwnerID:  ctx.Package.Owner.ID,
 		FileType: cran_module.TypeSource,
-		Filename: ctx.Params("filename"),
+		Filename: ctx.PathParam("filename"),
 	})
 }
 
@@ -233,9 +232,9 @@ func DownloadBinaryPackageFile(ctx *context.Context) {
 	downloadPackageFile(ctx, &cran_model.SearchOptions{
 		OwnerID:  ctx.Package.Owner.ID,
 		FileType: cran_module.TypeBinary,
-		Platform: ctx.Params("platform"),
-		RVersion: ctx.Params("rversion"),
-		Filename: ctx.Params("filename"),
+		Platform: ctx.PathParam("platform"),
+		RVersion: ctx.PathParam("rversion"),
+		Filename: ctx.PathParam("filename"),
 	})
 }
 
@@ -250,7 +249,7 @@ func downloadPackageFile(ctx *context.Context, opts *cran_model.SearchOptions) {
 		return
 	}
 
-	s, u, _, err := packages_service.GetPackageFileStream(ctx, pf)
+	s, u, _, err := packages_service.OpenFileForDownload(ctx, pf, ctx.Req.Method)
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			apiError(ctx, http.StatusNotFound, err)

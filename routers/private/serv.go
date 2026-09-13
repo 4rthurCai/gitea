@@ -8,24 +8,24 @@ import (
 	"net/http"
 	"strings"
 
-	asymkey_model "code.gitea.io/gitea/models/asymkey"
-	"code.gitea.io/gitea/models/perm"
-	access_model "code.gitea.io/gitea/models/perm/access"
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/models/unit"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/private"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/services/context"
-	repo_service "code.gitea.io/gitea/services/repository"
-	wiki_service "code.gitea.io/gitea/services/wiki"
+	asymkey_model "gitea.dev/models/asymkey"
+	"gitea.dev/models/perm"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unit"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/private"
+	"gitea.dev/modules/setting"
+	"gitea.dev/services/context"
+	repo_service "gitea.dev/services/repository"
+	wiki_service "gitea.dev/services/wiki"
 )
 
 // ServNoCommand returns information about the provided keyid
 func ServNoCommand(ctx *context.PrivateContext) {
-	keyID := ctx.ParamsInt64(":keyid")
+	keyID := ctx.PathParamInt64("keyid")
 	if keyID <= 0 {
 		ctx.JSON(http.StatusBadRequest, private.Response{
 			UserMsg: fmt.Sprintf("Bad key id: %d", keyID),
@@ -77,10 +77,11 @@ func ServNoCommand(ctx *context.PrivateContext) {
 
 // ServCommand returns information about the provided keyid
 func ServCommand(ctx *context.PrivateContext) {
-	keyID := ctx.ParamsInt64(":keyid")
-	ownerName := ctx.Params(":owner")
-	repoName := ctx.Params(":repo")
+	keyID := ctx.PathParamInt64("keyid")
+	ownerName := ctx.PathParam("owner")
+	repoName := ctx.PathParam("repo")
 	mode := perm.AccessMode(ctx.FormInt("mode"))
+	verb := ctx.FormString("verb")
 
 	// Set the basic parts of the results to return
 	results := private.ServCommandResults{
@@ -109,7 +110,17 @@ func ServCommand(ctx *context.PrivateContext) {
 
 	owner, err := user_model.GetUserByName(ctx, results.OwnerName)
 	if err != nil {
-		if user_model.IsErrUserNotExist(err) {
+		if !user_model.IsErrUserNotExist(err) {
+			log.Error("Unable to get repository owner: %s/%s Error: %v", results.OwnerName, results.RepoName, err)
+			ctx.JSON(http.StatusForbidden, private.Response{
+				UserMsg: fmt.Sprintf("Unable to get repository owner: %s/%s %v", results.OwnerName, results.RepoName, err),
+			})
+			return
+		}
+
+		// Check if there is a user redirect for the requested owner
+		redirectedUserID, err := user_model.LookupUserRedirect(ctx, results.OwnerName)
+		if err != nil {
 			// User is fetching/cloning a non-existent repository
 			log.Warn("Failed authentication attempt (cannot find repository: %s/%s) from %s", results.OwnerName, results.RepoName, ctx.RemoteAddr())
 			ctx.JSON(http.StatusNotFound, private.Response{
@@ -117,11 +128,20 @@ func ServCommand(ctx *context.PrivateContext) {
 			})
 			return
 		}
-		log.Error("Unable to get repository owner: %s/%s Error: %v", results.OwnerName, results.RepoName, err)
-		ctx.JSON(http.StatusForbidden, private.Response{
-			UserMsg: fmt.Sprintf("Unable to get repository owner: %s/%s %v", results.OwnerName, results.RepoName, err),
-		})
-		return
+
+		redirectUser, err := user_model.GetUserByID(ctx, redirectedUserID)
+		if err != nil {
+			// User is fetching/cloning a non-existent repository
+			log.Warn("Failed authentication attempt (cannot find repository: %s/%s) from %s", results.OwnerName, results.RepoName, ctx.RemoteAddr())
+			ctx.JSON(http.StatusNotFound, private.Response{
+				UserMsg: fmt.Sprintf("Cannot find repository: %s/%s", results.OwnerName, results.RepoName),
+			})
+			return
+		}
+
+		log.Info("User %s has been redirected to %s", results.OwnerName, redirectUser.Name)
+		results.OwnerName = redirectUser.Name
+		owner = redirectUser
 	}
 	if !owner.IsOrganization() && !owner.IsActive {
 		ctx.JSON(http.StatusForbidden, private.Response{
@@ -134,24 +154,38 @@ func ServCommand(ctx *context.PrivateContext) {
 	repoExist := true
 	repo, err := repo_model.GetRepositoryByName(ctx, owner.ID, results.RepoName)
 	if err != nil {
-		if repo_model.IsErrRepoNotExist(err) {
-			repoExist = false
-			for _, verb := range ctx.FormStrings("verb") {
-				if verb == "git-upload-pack" {
-					// User is fetching/cloning a non-existent repository
-					log.Warn("Failed authentication attempt (cannot find repository: %s/%s) from %s", results.OwnerName, results.RepoName, ctx.RemoteAddr())
-					ctx.JSON(http.StatusNotFound, private.Response{
-						UserMsg: fmt.Sprintf("Cannot find repository: %s/%s", results.OwnerName, results.RepoName),
-					})
-					return
-				}
-			}
-		} else {
+		if !repo_model.IsErrRepoNotExist(err) {
 			log.Error("Unable to get repository: %s/%s Error: %v", results.OwnerName, results.RepoName, err)
 			ctx.JSON(http.StatusInternalServerError, private.Response{
 				Err: fmt.Sprintf("Unable to get repository: %s/%s %v", results.OwnerName, results.RepoName, err),
 			})
 			return
+		}
+
+		redirectedRepoID, err := repo_model.LookupRedirect(ctx, owner.ID, results.RepoName)
+		if err == nil {
+			redirectedRepo, err := repo_model.GetRepositoryByID(ctx, redirectedRepoID)
+			if err == nil {
+				log.Info("Repository %s/%s has been redirected to %s/%s", results.OwnerName, results.RepoName, redirectedRepo.OwnerName, redirectedRepo.Name)
+				results.RepoName = redirectedRepo.Name
+				results.OwnerName = redirectedRepo.OwnerName
+				repo = redirectedRepo
+				owner.ID = redirectedRepo.OwnerID
+			} else {
+				log.Warn("Repo %s/%s has a redirect to repo with ID %d, but no repo with this ID could be found. Trying without redirect...", results.OwnerName, results.RepoName, redirectedRepoID)
+			}
+		}
+
+		if repo == nil {
+			repoExist = false
+			if mode == perm.AccessModeRead {
+				// User is fetching/cloning a non-existent repository
+				log.Warn("Failed authentication attempt (cannot find repository: %s/%s) from %s", results.OwnerName, results.RepoName, ctx.RemoteAddr())
+				ctx.JSON(http.StatusNotFound, private.Response{
+					UserMsg: fmt.Sprintf("Cannot find repository: %s/%s", results.OwnerName, results.RepoName),
+				})
+				return
+			}
 		}
 	}
 
@@ -287,7 +321,7 @@ func ServCommand(ctx *context.PrivateContext) {
 			repo.IsPrivate ||
 			owner.Visibility.IsPrivate() ||
 			(user != nil && user.IsRestricted) || // user will be nil if the key is a deploykey
-			setting.Service.RequireSignInView) {
+			setting.Service.RequireSignInViewStrict) {
 		if key.Type == asymkey_model.KeyTypeDeploy {
 			if deployKey.Mode < mode {
 				ctx.JSON(http.StatusUnauthorized, private.Response{
@@ -296,12 +330,15 @@ func ServCommand(ctx *context.PrivateContext) {
 				return
 			}
 		} else {
-			// Because of the special ref "refs/for" we will need to delay write permission check
-			if git.DefaultFeatures().SupportProcReceive && unitType == unit.TypeCode {
+			// Because of the special ref "refs/for" (AGit) we will need to delay write permission check,
+			// AGit flow needs to write its own ref when the doer has "reader" permission (allowing to create PR).
+			// The real permission check is done in HookPreReceive (routers/private/hook_pre_receive.go).
+			// Here it should relax the permission check for "git push (git-receive-pack)", but not for others like LFS operations.
+			if git.DefaultFeatures().SupportProcReceive && unitType == unit.TypeCode && verb == git.CmdVerbReceivePack {
 				mode = perm.AccessModeRead
 			}
 
-			perm, err := access_model.GetUserRepoPermission(ctx, repo, user)
+			perm, err := access_model.GetDoerRepoPermission(ctx, repo, user)
 			if err != nil {
 				log.Error("Unable to get permissions for %-v with key %d in %-v Error: %v", user, key.ID, repo, err)
 				ctx.JSON(http.StatusInternalServerError, private.Response{

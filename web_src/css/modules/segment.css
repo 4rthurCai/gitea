@@ -123,13 +123,6 @@
   clear: both;
 }
 
-.ui[class*="left aligned"].segment {
-  text-align: left;
-}
-.ui[class*="center aligned"].segment {
-  text-align: center;
-}
-
 .ui.secondary.segment {
   background: var(--color-secondary-bg);
   color: var(--color-text-light);
@@ -156,7 +149,8 @@
 .ui.attached.segment:last-child,
 .ui.segment:has(+ .ui.segment:not(.attached)),
 .ui.attached.segment:has(+ .ui.modal) {
-  border-radius: 0 0 0.28571429rem 0.28571429rem;
+  border-bottom-left-radius: 0.28571429rem;
+  border-bottom-right-radius: 0.28571429rem;
 }
 
 .ui[class*="top attached"].segment {
@@ -185,13 +179,8 @@
   margin-bottom: 1rem;
 }
 
-.ui.fitted.segment:not(.horizontally) {
-  padding-top: 0;
-  padding-bottom: 0;
-}
-.ui.fitted.segment:not(.vertically) {
-  padding-left: 0;
-  padding-right: 0;
+.ui.fitted.segment {
+  padding: 0;
 }
 
 .ui.segments .segment,

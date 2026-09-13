@@ -11,16 +11,17 @@ import (
 	"strings"
 	"testing"
 
-	auth_model "code.gitea.io/gitea/models/auth"
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/models/unittest"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/packages/npm"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/tests"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/packages"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/packages/npm"
+	"gitea.dev/modules/setting"
+	"gitea.dev/tests"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPackageNpm(t *testing.T) {
@@ -28,7 +29,7 @@ func TestPackageNpm(t *testing.T) {
 
 	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
 
-	token := fmt.Sprintf("Bearer %s", getTokenForLoggedInUser(t, loginUser(t, user.Name), auth_model.AccessTokenScopeWritePackage))
+	token := "Bearer " + getTokenForLoggedInUser(t, loginUser(t, user.Name), auth_model.AccessTokenScopeWritePackage)
 
 	packageName := "@scope/test-package"
 	packageVersion := "1.0.1-pre"
@@ -40,6 +41,7 @@ func TestPackageNpm(t *testing.T) {
 	packageBinPath := "./cli.sh"
 	repoType := "gitea"
 	repoURL := "http://localhost:3000/gitea/test.git"
+	repoDirectory := "package-subdir"
 
 	data := "H4sIAAAAAAAA/ytITM5OTE/VL4DQelnF+XkMVAYGBgZmJiYK2MRBwNDcSIHB2NTMwNDQzMwAqA7IMDUxA9LUdgg2UFpcklgEdAql5kD8ogCnhwio5lJQUMpLzE1VslJQcihOzi9I1S9JLS7RhSYIJR2QgrLUouLM/DyQGkM9Az1D3YIiqExKanFyUWZBCVQ2BKhVwQVJDKwosbQkI78IJO/tZ+LsbRykxFXLNdA+HwWjYBSMgpENACgAbtAACAAA"
 
@@ -52,24 +54,35 @@ func TestPackageNpm(t *testing.T) {
 			  "` + packageTag + `": "` + version + `"
 			},
 			"versions": {
-			  "` + version + `": {
-				"name": "` + packageName + `",
-				"version": "` + version + `",
-				"description": "` + packageDescription + `",
-				"author": {
-				  "name": "` + packageAuthor + `"
-				},
-        "bin": {
-          "` + packageBinName + `": "` + packageBinPath + `"
-        },
-				"dist": {
-				  "integrity": "sha512-yA4FJsVhetynGfOC1jFf79BuS+jrHbm0fhh+aHzCQkOaOBXKf9oBnC4a6DnLLnEsHQDRLYd00cwj8sCXpC+wIg==",
-				  "shasum": "aaa7eaf852a948b0aa05afeda35b1badca155d90"
-				},
-				"repository": {
-					"type": "` + repoType + `",
-					"url": "` + repoURL + `"
-				}
+			  	"` + version + `": {
+					"name": "` + packageName + `",
+					"version": "` + version + `",
+					"description": "` + packageDescription + `",
+					"author": {
+				  	"name": "` + packageAuthor + `"
+					},
+        	"bin": {
+        	  "` + packageBinName + `": "` + packageBinPath + `"
+      	  },
+					"dist": {
+					  "integrity": "sha512-yA4FJsVhetynGfOC1jFf79BuS+jrHbm0fhh+aHzCQkOaOBXKf9oBnC4a6DnLLnEsHQDRLYd00cwj8sCXpC+wIg==",
+					  "shasum": "aaa7eaf852a948b0aa05afeda35b1badca155d90"
+					},
+					"repository": {
+						"type": "` + repoType + `",
+						"url": "` + repoURL + `",
+						"directory": "` + repoDirectory + `"
+					},
+					"readme": "[docs](docs/usage.md)\n![logo](logo.png)",
+					"peerDependencies": {
+						"tea": "2.x",
+						"soy-milk": "1.2"
+					},
+					"peerDependenciesMeta": {
+						"soy-milk": {
+							"optional": true
+						}
+					}
 			  }
 			},
 			"_attachments": {
@@ -91,11 +104,11 @@ func TestPackageNpm(t *testing.T) {
 			AddTokenAuth(token)
 		MakeRequest(t, req, http.StatusCreated)
 
-		pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeNpm)
+		pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeNpm)
 		assert.NoError(t, err)
 		assert.Len(t, pvs, 1)
 
-		pd, err := packages.GetPackageDescriptor(db.DefaultContext, pvs[0])
+		pd, err := packages.GetPackageDescriptor(t.Context(), pvs[0])
 		assert.NoError(t, err)
 		assert.NotNil(t, pd.SemVer)
 		assert.IsType(t, &npm.Metadata{}, pd.Metadata)
@@ -105,13 +118,13 @@ func TestPackageNpm(t *testing.T) {
 		assert.Equal(t, npm.TagProperty, pd.VersionProperties[0].Name)
 		assert.Equal(t, packageTag, pd.VersionProperties[0].Value)
 
-		pfs, err := packages.GetFilesByVersionID(db.DefaultContext, pvs[0].ID)
+		pfs, err := packages.GetFilesByVersionID(t.Context(), pvs[0].ID)
 		assert.NoError(t, err)
 		assert.Len(t, pfs, 1)
 		assert.Equal(t, filename, pfs[0].Name)
 		assert.True(t, pfs[0].IsLead)
 
-		pb, err := packages.GetBlobByID(db.DefaultContext, pfs[0].BlobID)
+		pb, err := packages.GetBlobByID(t.Context(), pfs[0].BlobID)
 		assert.NoError(t, err)
 		assert.Equal(t, int64(192), pb.Size)
 	})
@@ -140,7 +153,7 @@ func TestPackageNpm(t *testing.T) {
 
 		assert.Equal(t, b, resp.Body.Bytes())
 
-		pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeNpm)
+		pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeNpm)
 		assert.NoError(t, err)
 		assert.Len(t, pvs, 1)
 		assert.Equal(t, int64(2), pvs[0].DownloadCount)
@@ -157,8 +170,7 @@ func TestPackageNpm(t *testing.T) {
 			AddTokenAuth(token)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		var result npm.PackageMetadata
-		DecodeJSON(t, resp, &result)
+		result := DecodeJSON(t, resp, &npm.PackageMetadata{})
 
 		assert.Equal(t, packageName, result.ID)
 		assert.Equal(t, packageName, result.Name)
@@ -178,6 +190,8 @@ func TestPackageNpm(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("%s%s/-/%s/%s", setting.AppURL, root[1:], packageVersion, filename), pmv.Dist.Tarball)
 		assert.Equal(t, repoType, result.Repository.Type)
 		assert.Equal(t, repoURL, result.Repository.URL)
+		assert.Equal(t, map[string]string{"tea": "2.x", "soy-milk": "1.2"}, pmv.PeerDependencies)
+		assert.Equal(t, map[string]any{"soy-milk": map[string]any{"optional": true}}, pmv.PeerDependenciesMeta)
 	})
 
 	t.Run("AddTag", func(t *testing.T) {
@@ -194,6 +208,12 @@ func TestPackageNpm(t *testing.T) {
 		test(t, http.StatusNotFound, packageTag2, "1.2")
 		test(t, http.StatusOK, packageTag, packageVersion)
 		test(t, http.StatusOK, packageTag2, packageVersion)
+
+		// an oversized dist-tag body is rejected instead of being read unbounded
+		oversized := strings.Repeat("a", 5*1024)
+		req := NewRequestWithBody(t, "PUT", fmt.Sprintf("%s/%s", tagsRoot, packageTag), strings.NewReader(oversized)).
+			AddTokenAuth(token)
+		MakeRequest(t, req, http.StatusRequestEntityTooLarge)
 	})
 
 	t.Run("ListTags", func(t *testing.T) {
@@ -203,8 +223,7 @@ func TestPackageNpm(t *testing.T) {
 			AddTokenAuth(token)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		var result map[string]string
-		DecodeJSON(t, resp, &result)
+		result := DecodeJSON(t, resp, map[string]string{})
 
 		assert.Len(t, result, 2)
 		assert.Contains(t, result, packageTag)
@@ -220,8 +239,7 @@ func TestPackageNpm(t *testing.T) {
 			AddTokenAuth(token)
 		resp := MakeRequest(t, req, http.StatusOK)
 
-		var result npm.PackageMetadata
-		DecodeJSON(t, resp, &result)
+		result := DecodeJSON(t, resp, &npm.PackageMetadata{})
 
 		assert.Len(t, result.DistTags, 2)
 		assert.Contains(t, result.DistTags, packageTag)
@@ -268,12 +286,33 @@ func TestPackageNpm(t *testing.T) {
 			req := NewRequest(t, "GET", fmt.Sprintf("%s?text=%s&from=%d&size=%d", url, c.Query, c.Skip, c.Take))
 			resp := MakeRequest(t, req, http.StatusOK)
 
-			var result npm.PackageSearch
-			DecodeJSON(t, resp, &result)
+			result := DecodeJSON(t, resp, &npm.PackageSearch{})
 
 			assert.Equal(t, c.ExpectedTotal, result.Total, "case %d: unexpected total hits", i)
 			assert.Len(t, result.Objects, c.ExpectedResults, "case %d: unexpected result count", i)
 		}
+	})
+
+	t.Run("WebViewReadmeRepoLinks", func(t *testing.T) {
+		defer tests.PrintCurrentTest(t)()
+
+		pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeNpm)
+		assert.NoError(t, err)
+		require.Len(t, pvs, 1)
+
+		// link the package to a repository so README relative links resolve against
+		// repository files instead of the site root
+		repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1})
+		assert.NoError(t, packages.SetRepositoryLink(t.Context(), pvs[0].PackageID, repo.ID))
+
+		req := NewRequest(t, "GET", fmt.Sprintf("/%s/-/packages/npm/%s/%s", user.Name, url.PathEscape(packageName), packageVersion)).
+			AddBasicAuth(user.Name)
+		resp := MakeRequest(t, req, http.StatusOK)
+		doc := NewHTMLParser(t, resp.Body)
+		rendered, _ := doc.Find(".markup.markdown").Html()
+		assertHTMLEq(t, `<p dir="auto"><a href="/user2/repo1/src/branch/master/package-subdir/docs/usage.md" rel="nofollow">docs</a>
+<a href="/user2/repo1/src/branch/master/package-subdir/logo.png" rel="nofollow noopener" target="_blank"><img src="/user2/repo1/media/branch/master/package-subdir/logo.png" alt="logo" loading="lazy"/></a></p>
+`, rendered)
 	})
 
 	t.Run("Delete", func(t *testing.T) {
@@ -293,7 +332,7 @@ func TestPackageNpm(t *testing.T) {
 		t.Run("Version", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
-			pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeNpm)
+			pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeNpm)
 			assert.NoError(t, err)
 			assert.Len(t, pvs, 2)
 
@@ -304,7 +343,7 @@ func TestPackageNpm(t *testing.T) {
 				AddTokenAuth(token)
 			MakeRequest(t, req, http.StatusOK)
 
-			pvs, err = packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeNpm)
+			pvs, err = packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeNpm)
 			assert.NoError(t, err)
 			assert.Len(t, pvs, 1)
 		})
@@ -312,7 +351,7 @@ func TestPackageNpm(t *testing.T) {
 		t.Run("Full", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
-			pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeNpm)
+			pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeNpm)
 			assert.NoError(t, err)
 			assert.Len(t, pvs, 1)
 
@@ -323,9 +362,9 @@ func TestPackageNpm(t *testing.T) {
 				AddTokenAuth(token)
 			MakeRequest(t, req, http.StatusOK)
 
-			pvs, err = packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeNpm)
+			pvs, err = packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeNpm)
 			assert.NoError(t, err)
-			assert.Len(t, pvs, 0)
+			assert.Empty(t, pvs)
 		})
 	})
 }

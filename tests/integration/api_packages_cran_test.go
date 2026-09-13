@@ -5,19 +5,18 @@ package integration
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"fmt"
 	"net/http"
 	"testing"
 
-	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/models/unittest"
-	user_model "code.gitea.io/gitea/models/user"
-	cran_module "code.gitea.io/gitea/modules/packages/cran"
-	"code.gitea.io/gitea/tests"
+	"gitea.dev/models/packages"
+	"gitea.dev/models/unittest"
+	user_model "gitea.dev/models/user"
+	cran_module "gitea.dev/modules/packages/cran"
+	"gitea.dev/modules/test"
+	"gitea.dev/tests"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -83,18 +82,18 @@ func TestPackageCran(t *testing.T) {
 			)).AddBasicAuth(user.Name)
 			MakeRequest(t, req, http.StatusCreated)
 
-			pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeCran)
+			pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeCran)
 			assert.NoError(t, err)
 			assert.Len(t, pvs, 1)
 
-			pd, err := packages.GetPackageDescriptor(db.DefaultContext, pvs[0])
+			pd, err := packages.GetPackageDescriptor(t.Context(), pvs[0])
 			assert.NoError(t, err)
 			assert.Nil(t, pd.SemVer)
 			assert.IsType(t, &cran_module.Metadata{}, pd.Metadata)
 			assert.Equal(t, packageName, pd.Package.Name)
 			assert.Equal(t, packageVersion, pd.Version.Version)
 
-			pfs, err := packages.GetFilesByVersionID(db.DefaultContext, pvs[0].ID)
+			pfs, err := packages.GetFilesByVersionID(t.Context(), pvs[0].ID)
 			assert.NoError(t, err)
 			assert.Len(t, pfs, 1)
 			assert.Equal(t, fmt.Sprintf("%s_%s.tar.gz", packageName, packageVersion), pfs[0].Name)
@@ -115,6 +114,14 @@ func TestPackageCran(t *testing.T) {
 			MakeRequest(t, req, http.StatusOK)
 		})
 
+		t.Run("DownloadArchived", func(t *testing.T) {
+			defer tests.PrintCurrentTest(t)()
+
+			req := NewRequest(t, "GET", fmt.Sprintf("%s/src/contrib/Archive/%s/%s_%s.tar.gz", url, packageName, packageName, packageVersion)).
+				AddBasicAuth(user.Name)
+			MakeRequest(t, req, http.StatusOK)
+		})
+
 		t.Run("Enumerate", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
@@ -125,8 +132,8 @@ func TestPackageCran(t *testing.T) {
 			assert.Contains(t, resp.Header().Get("Content-Type"), "text/plain")
 
 			body := resp.Body.String()
-			assert.Contains(t, body, fmt.Sprintf("Package: %s", packageName))
-			assert.Contains(t, body, fmt.Sprintf("Version: %s", packageVersion))
+			assert.Contains(t, body, "Package: "+packageName)
+			assert.Contains(t, body, "Version: "+packageVersion)
 
 			req = NewRequest(t, "GET", url+"/src/contrib/PACKAGES.gz").
 				AddBasicAuth(user.Name)
@@ -137,15 +144,6 @@ func TestPackageCran(t *testing.T) {
 	})
 
 	t.Run("Binary", func(t *testing.T) {
-		createArchive := func(filename string, content []byte) *bytes.Buffer {
-			var buf bytes.Buffer
-			archive := zip.NewWriter(&buf)
-			w, _ := archive.Create(filename)
-			w.Write(content)
-			archive.Close()
-			return &buf
-		}
-
 		t.Run("Upload", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
@@ -154,38 +152,34 @@ func TestPackageCran(t *testing.T) {
 			req := NewRequestWithBody(t, "PUT", uploadURL, bytes.NewReader([]byte{}))
 			MakeRequest(t, req, http.StatusUnauthorized)
 
-			req = NewRequestWithBody(t, "PUT", uploadURL, createArchive(
-				"dummy.txt",
-				[]byte{},
-			)).AddBasicAuth(user.Name)
+			req = NewRequestWithBody(t, "PUT", uploadURL, test.WriteZipArchive(map[string]string{
+				"dummy.txt": "",
+			})).AddBasicAuth(user.Name)
 			MakeRequest(t, req, http.StatusBadRequest)
 
-			req = NewRequestWithBody(t, "PUT", uploadURL+"?platform=&rversion=", createArchive(
-				"package/DESCRIPTION",
-				createDescription(packageName, packageVersion),
-			)).AddBasicAuth(user.Name)
+			req = NewRequestWithBody(t, "PUT", uploadURL+"?platform=&rversion=", test.WriteZipArchive(map[string]string{
+				"package/DESCRIPTION": string(createDescription(packageName, packageVersion)),
+			})).AddBasicAuth(user.Name)
 			MakeRequest(t, req, http.StatusBadRequest)
 
 			uploadURL += "?platform=windows&rversion=4.2"
 
-			req = NewRequestWithBody(t, "PUT", uploadURL, createArchive(
-				"package/DESCRIPTION",
-				createDescription(packageName, packageVersion),
-			)).AddBasicAuth(user.Name)
+			req = NewRequestWithBody(t, "PUT", uploadURL, test.WriteZipArchive(map[string]string{
+				"package/DESCRIPTION": string(createDescription(packageName, packageVersion)),
+			})).AddBasicAuth(user.Name)
 			MakeRequest(t, req, http.StatusCreated)
 
-			pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypeCran)
+			pvs, err := packages.GetVersionsByPackageType(t.Context(), user.ID, packages.TypeCran)
 			assert.NoError(t, err)
 			assert.Len(t, pvs, 1)
 
-			pfs, err := packages.GetFilesByVersionID(db.DefaultContext, pvs[0].ID)
+			pfs, err := packages.GetFilesByVersionID(t.Context(), pvs[0].ID)
 			assert.NoError(t, err)
 			assert.Len(t, pfs, 2)
 
-			req = NewRequestWithBody(t, "PUT", uploadURL, createArchive(
-				"package/DESCRIPTION",
-				createDescription(packageName, packageVersion),
-			)).AddBasicAuth(user.Name)
+			req = NewRequestWithBody(t, "PUT", uploadURL, test.WriteZipArchive(map[string]string{
+				"package/DESCRIPTION": string(createDescription(packageName, packageVersion)),
+			})).AddBasicAuth(user.Name)
 			MakeRequest(t, req, http.StatusConflict)
 		})
 
@@ -222,8 +216,8 @@ func TestPackageCran(t *testing.T) {
 			assert.Contains(t, resp.Header().Get("Content-Type"), "text/plain")
 
 			body := resp.Body.String()
-			assert.Contains(t, body, fmt.Sprintf("Package: %s", packageName))
-			assert.Contains(t, body, fmt.Sprintf("Version: %s", packageVersion))
+			assert.Contains(t, body, "Package: "+packageName)
+			assert.Contains(t, body, "Version: "+packageVersion)
 
 			req = NewRequest(t, "GET", url+"/bin/windows/contrib/4.2/PACKAGES.gz").
 				AddBasicAuth(user.Name)

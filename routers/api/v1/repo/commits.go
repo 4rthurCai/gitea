@@ -5,19 +5,20 @@
 package repo
 
 import (
-	"fmt"
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
-	issues_model "code.gitea.io/gitea/models/issues"
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/setting"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/utils"
-	"code.gitea.io/gitea/services/context"
-	"code.gitea.io/gitea/services/convert"
+	issues_model "gitea.dev/models/issues"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/gitrepo"
+	"gitea.dev/modules/setting"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
 )
 
 // GetSingleCommit get a commit via sha
@@ -63,9 +64,9 @@ func GetSingleCommit(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	sha := ctx.Params(":sha")
+	sha := ctx.PathParam("sha")
 	if !git.IsValidRefPattern(sha) {
-		ctx.Error(http.StatusUnprocessableEntity, "no valid ref or sha", fmt.Sprintf("no valid ref or sha: %s", sha))
+		ctx.APIError(http.StatusUnprocessableEntity, "no valid ref or sha: "+sha)
 		return
 	}
 
@@ -76,16 +77,16 @@ func getCommit(ctx *context.APIContext, identifier string, toCommitOpts convert.
 	commit, err := ctx.Repo.GitRepo.GetCommit(identifier)
 	if err != nil {
 		if git.IsErrNotExist(err) {
-			ctx.NotFound(identifier)
+			ctx.APIErrorNotFound("commit doesn't exist: " + identifier)
 			return
 		}
-		ctx.Error(http.StatusInternalServerError, "gitRepo.GetCommit", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	json, err := convert.ToCommit(ctx, ctx.Repo.Repository, ctx.Repo.GitRepo, commit, nil, toCommitOpts)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "toCommit", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.JSON(http.StatusOK, json)
@@ -117,6 +118,16 @@ func GetAllCommits(ctx *context.APIContext) {
 	//   in: query
 	//   description: filepath of a file/dir
 	//   type: string
+	// - name: since
+	//   in: query
+	//   description: Only commits after this date will be returned (ISO 8601 format)
+	//   type: string
+	//   format: date-time
+	// - name: until
+	//   in: query
+	//   description: Only commits before this date will be returned (ISO 8601 format)
+	//   type: string
+	//   format: date-time
 	// - name: stat
 	//   in: query
 	//   description: include diff stats for every commit (disable for speedup, default 'true')
@@ -149,6 +160,23 @@ func GetAllCommits(ctx *context.APIContext) {
 	//   "409":
 	//     "$ref": "#/responses/EmptyRepository"
 
+	since := ctx.FormString("since")
+	until := ctx.FormString("until")
+
+	// Validate since/until as ISO 8601 (RFC3339)
+	if since != "" {
+		if _, err := time.Parse(time.RFC3339, since); err != nil {
+			ctx.APIError(http.StatusUnprocessableEntity, "invalid 'since' format, expected ISO 8601 (RFC3339)")
+			return
+		}
+	}
+	if until != "" {
+		if _, err := time.Parse(time.RFC3339, until); err != nil {
+			ctx.APIError(http.StatusUnprocessableEntity, "invalid 'until' format, expected ISO 8601 (RFC3339)")
+			return
+		}
+	}
+
 	if ctx.Repo.Repository.IsEmpty {
 		ctx.JSON(http.StatusConflict, api.APIError{
 			Message: "Git Repository is empty.",
@@ -180,41 +208,36 @@ func GetAllCommits(ctx *context.APIContext) {
 		var baseCommit *git.Commit
 		if len(sha) == 0 {
 			// no sha supplied - use default branch
-			head, err := ctx.Repo.GitRepo.GetHEADBranch()
+			baseCommit, err = ctx.Repo.GitRepo.GetBranchCommit(ctx.Repo.Repository.DefaultBranch)
 			if err != nil {
-				ctx.Error(http.StatusInternalServerError, "GetHEADBranch", err)
-				return
-			}
-
-			baseCommit, err = ctx.Repo.GitRepo.GetBranchCommit(head.Name)
-			if err != nil {
-				ctx.Error(http.StatusInternalServerError, "GetCommit", err)
+				ctx.APIErrorInternal(err)
 				return
 			}
 		} else {
 			// get commit specified by sha
 			baseCommit, err = ctx.Repo.GitRepo.GetCommit(sha)
 			if err != nil {
-				ctx.Error(http.StatusInternalServerError, "GetCommit", err)
+				ctx.APIErrorAuto(err)
 				return
 			}
 		}
 
 		// Total commit count
-		commitsCountTotal, err = git.CommitsCount(ctx.Repo.GitRepo.Ctx, git.CommitsCountOptions{
-			RepoPath: ctx.Repo.GitRepo.Path,
+		commitsCountTotal, err = gitrepo.CommitsCount(ctx, ctx.Repo.Repository, gitrepo.CommitsCountOptions{
 			Not:      not,
 			Revision: []string{baseCommit.ID.String()},
+			Since:    since,
+			Until:    until,
 		})
 		if err != nil {
-			ctx.Error(http.StatusInternalServerError, "GetCommitsCount", err)
+			ctx.APIErrorInternal(err)
 			return
 		}
 
 		// Query commits
-		commits, err = baseCommit.CommitsByRange(listOptions.Page, listOptions.PageSize, not)
+		commits, err = baseCommit.CommitsByRange(listOptions.Page, listOptions.PageSize, not, since, until)
 		if err != nil {
-			ctx.Error(http.StatusInternalServerError, "CommitsByRange", err)
+			ctx.APIErrorInternal(err)
 			return
 		}
 	} else {
@@ -222,31 +245,53 @@ func GetAllCommits(ctx *context.APIContext) {
 			sha = ctx.Repo.Repository.DefaultBranch
 		}
 
-		commitsCountTotal, err = git.CommitsCount(ctx,
-			git.CommitsCountOptions{
-				RepoPath: ctx.Repo.GitRepo.Path,
+		commitsCountTotal, err = gitrepo.CommitsCount(ctx, ctx.Repo.Repository,
+			gitrepo.CommitsCountOptions{
 				Not:      not,
 				Revision: []string{sha},
 				RelPath:  []string{path},
+				Since:    since,
+				Until:    until,
 			})
 
 		if err != nil {
-			ctx.Error(http.StatusInternalServerError, "FileCommitsCount", err)
+			ctx.APIErrorInternal(err)
 			return
 		} else if commitsCountTotal == 0 {
-			ctx.NotFound("FileCommitsCount", nil)
-			return
+			// when date filters are active, a zero count may just mean no
+			// commits in the requested range — not that the path is invalid
+			if since == "" && until == "" {
+				ctx.APIErrorNotFound()
+				return
+			}
+			// verify the path actually exists in the revision history
+			totalWithoutDate, err := gitrepo.CommitsCount(ctx, ctx.Repo.Repository,
+				gitrepo.CommitsCountOptions{
+					Not:      not,
+					Revision: []string{sha},
+					RelPath:  []string{path},
+				})
+			if err != nil {
+				ctx.APIErrorInternal(err)
+				return
+			}
+			if totalWithoutDate == 0 {
+				ctx.APIErrorNotFound()
+				return
+			}
 		}
 
-		commits, err = ctx.Repo.GitRepo.CommitsByFileAndRange(
+		commits, _, err = ctx.Repo.GitRepo.CommitsByFileAndRange(
 			git.CommitsByFileAndRangeOptions{
 				Revision: sha,
 				File:     path,
 				Not:      not,
 				Page:     listOptions.Page,
+				Since:    since,
+				Until:    until,
 			})
 		if err != nil {
-			ctx.Error(http.StatusInternalServerError, "CommitsByFileAndRange", err)
+			ctx.APIErrorInternal(err)
 			return
 		}
 	}
@@ -259,12 +304,12 @@ func GetAllCommits(ctx *context.APIContext) {
 		// Create json struct
 		apiCommits[i], err = convert.ToCommit(ctx, ctx.Repo.Repository, ctx.Repo.GitRepo, commit, userCache, convert.ParseCommitOptions(ctx))
 		if err != nil {
-			ctx.Error(http.StatusInternalServerError, "toCommit", err)
+			ctx.APIErrorInternal(err)
 			return
 		}
 	}
 
-	ctx.SetLinkHeader(int(commitsCountTotal), listOptions.PageSize)
+	ctx.SetLinkHeader(commitsCountTotal, listOptions.PageSize)
 	ctx.SetTotalCountHeader(commitsCountTotal)
 
 	// kept for backwards compatibility
@@ -312,24 +357,24 @@ func DownloadCommitDiffOrPatch(ctx *context.APIContext) {
 	//     "$ref": "#/responses/string"
 	//   "404":
 	//     "$ref": "#/responses/notFound"
-	sha := ctx.Params(":sha")
-	diffType := git.RawDiffType(ctx.Params(":diffType"))
+	sha := ctx.PathParam("sha")
+	diffType := git.RawDiffType(ctx.PathParam("diffType"))
 
 	if err := git.GetRawDiff(ctx.Repo.GitRepo, sha, diffType, ctx.Resp); err != nil {
 		if git.IsErrNotExist(err) {
-			ctx.NotFound(sha)
+			ctx.APIErrorNotFound("commit doesn't exist: " + sha)
 			return
 		}
-		ctx.Error(http.StatusInternalServerError, "DownloadCommitDiffOrPatch", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 }
 
-// GetCommitPullRequest returns the pull request of the commit
+// GetCommitPullRequest returns the merged pull request of the commit
 func GetCommitPullRequest(ctx *context.APIContext) {
 	// swagger:operation GET /repos/{owner}/{repo}/commits/{sha}/pull repository repoGetCommitPullRequest
 	// ---
-	// summary: Get the pull request of the commit
+	// summary: Get the merged pull request of the commit
 	// produces:
 	// - application/json
 	// parameters:
@@ -354,22 +399,22 @@ func GetCommitPullRequest(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	pr, err := issues_model.GetPullRequestByMergedCommit(ctx, ctx.Repo.Repository.ID, ctx.Params(":sha"))
+	pr, err := issues_model.GetPullRequestByMergedCommit(ctx, ctx.Repo.Repository.ID, ctx.PathParam("sha"))
 	if err != nil {
 		if issues_model.IsErrPullRequestNotExist(err) {
-			ctx.Error(http.StatusNotFound, "GetPullRequestByMergedCommit", err)
+			ctx.APIError(http.StatusNotFound, err.Error())
 		} else {
-			ctx.Error(http.StatusInternalServerError, "GetPullRequestByIndex", err)
+			ctx.APIErrorInternal(err)
 		}
 		return
 	}
 
 	if err = pr.LoadBaseRepo(ctx); err != nil {
-		ctx.Error(http.StatusInternalServerError, "LoadBaseRepo", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	if err = pr.LoadHeadRepo(ctx); err != nil {
-		ctx.Error(http.StatusInternalServerError, "LoadHeadRepo", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.JSON(http.StatusOK, convert.ToAPIPullRequest(ctx, pr, ctx.Doer))

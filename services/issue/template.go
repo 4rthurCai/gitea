@@ -5,18 +5,18 @@ package issue
 
 import (
 	"fmt"
-	"io"
 	"net/url"
 	"path"
 	"strings"
 
-	"code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/issue/template"
-	"code.gitea.io/gitea/modules/log"
-	api "code.gitea.io/gitea/modules/structs"
+	"gitea.dev/models/repo"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/issue/template"
+	"gitea.dev/modules/log"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // templateDirCandidates issue templates directory
@@ -52,8 +52,6 @@ func GetTemplateConfig(gitRepo *git.Repository, path string, commit *git.Commit)
 		return GetDefaultTemplateConfig(), nil
 	}
 
-	var err error
-
 	treeEntry, err := commit.GetTreeEntryByPath(path)
 	if err != nil {
 		return GetDefaultTemplateConfig(), err
@@ -67,7 +65,7 @@ func GetTemplateConfig(gitRepo *git.Repository, path string, commit *git.Commit)
 
 	defer reader.Close()
 
-	configContent, err := io.ReadAll(reader)
+	configContent, err := util.ReadWithLimit(reader, 1024*1024)
 	if err != nil {
 		return GetDefaultTemplateConfig(), err
 	}

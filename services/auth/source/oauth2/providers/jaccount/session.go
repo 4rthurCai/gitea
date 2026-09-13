@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"code.gitea.io/gitea/modules/json"
+	"gitea.dev/modules/json"
 	"github.com/markbates/goth"
 )
 

@@ -5,11 +5,10 @@ package setting
 
 import (
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strings"
 
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/modules/log"
 )
 
 // enumerates all the policy repository creating
@@ -17,6 +16,12 @@ const (
 	RepoCreatingLastUserVisibility = "last"
 	RepoCreatingPrivate            = "private"
 	RepoCreatingPublic             = "public"
+)
+
+// enumerates the values for [repository.pull-request] DEFAULT_TITLE_SOURCE
+const (
+	RepoPRTitleSourceFirstCommit = "first-commit"
+	RepoPRTitleSourceAuto        = "auto"
 )
 
 // ItemsPerPage maximum items per page in forks, watchers and stars of a repo
@@ -32,6 +37,8 @@ var (
 		DefaultPrivate                          string
 		DefaultPushCreatePrivate                bool
 		MaxCreationLimit                        int
+		UserMaxCreationLimit                    int
+		OrgMaxCreationLimit                     int
 		PreferredLicenses                       []string
 		DisableHTTPGit                          bool
 		AccessControlAllowOrigin                string
@@ -43,6 +50,8 @@ var (
 		DisabledRepoUnits                       []string
 		DefaultRepoUnits                        []string
 		DefaultForkRepoUnits                    []string
+		DefaultMirrorRepoUnits                  []string
+		DefaultTemplateRepoUnits                []string
 		PrefixArchiveFiles                      bool
 		DisableMigrations                       bool
 		DisableStars                            bool `ini:"DISABLE_STARS"`
@@ -51,6 +60,13 @@ var (
 		AllowDeleteOfUnadoptedRepositories      bool
 		DisableDownloadSourceArchives           bool
 		AllowForkWithoutMaximumLimit            bool
+		AllowForkIntoSameOwner                  bool
+
+		// StreamArchives makes Gitea stream git archive files to the client directly instead of creating an archive first.
+		// Ideally all users should use this streaming method. However, at the moment we don't know whether there are
+		// any users who still need the old behavior, so we introduce this option, intentionally not documenting it.
+		// After one or two releases, if no one complains, we will remove this option and always use streaming.
+		StreamArchives bool
 
 		// Repository editor settings
 		Editor struct {
@@ -60,15 +76,9 @@ var (
 		// Repository upload settings
 		Upload struct {
 			Enabled      bool
-			TempPath     string
 			AllowedTypes string
 			FileMaxSize  int64
 			MaxFiles     int
-		} `ini:"-"`
-
-		// Repository local settings
-		Local struct {
-			LocalCopyPath string
 		} `ini:"-"`
 
 		// Pull request settings
@@ -84,8 +94,10 @@ var (
 			DefaultMergeMessageOfficialApproversOnly bool
 			PopulateSquashCommentWithCommitMessages  bool
 			AddCoCommitterTrailers                   bool
-			TestConflictingPatchesWithGitApply       bool
 			RetargetChildrenOnMerge                  bool
+			DelayCheckForInactiveDays                int
+			DefaultDeleteBranchAfterMerge            bool
+			DefaultTitleSource                       string
 		} `ini:"repository.pull-request"`
 
 		// Issue Setting
@@ -97,17 +109,21 @@ var (
 		Release struct {
 			AllowedTypes     string
 			DefaultPagingNum int
+			FileMaxSize      int64
+			MaxFiles         int64
 		} `ini:"repository.release"`
 
 		Signing struct {
 			SigningKey        string
 			SigningName       string
 			SigningEmail      string
+			SigningFormat     string
 			InitialCommit     []string
 			CRUDActions       []string `ini:"CRUD_ACTIONS"`
 			Merges            []string
 			Wiki              []string
 			DefaultTrustModel string
+			TrustedSSHKeys    []string `ini:"TRUSTED_SSH_KEYS"`
 		} `ini:"repository.signing"`
 	}{
 		DetectedCharsetsOrder: []string{
@@ -151,6 +167,8 @@ var (
 		DefaultPrivate:                          RepoCreatingLastUserVisibility,
 		DefaultPushCreatePrivate:                true,
 		MaxCreationLimit:                        -1,
+		UserMaxCreationLimit:                    -1,
+		OrgMaxCreationLimit:                     -1,
 		PreferredLicenses:                       []string{"Apache License 2.0", "MIT License"},
 		DisableHTTPGit:                          false,
 		AccessControlAllowOrigin:                "",
@@ -161,11 +179,14 @@ var (
 		DisabledRepoUnits:                       []string{},
 		DefaultRepoUnits:                        []string{},
 		DefaultForkRepoUnits:                    []string{},
+		DefaultMirrorRepoUnits:                  []string{},
+		DefaultTemplateRepoUnits:                []string{},
 		PrefixArchiveFiles:                      true,
 		DisableMigrations:                       false,
 		DisableStars:                            false,
 		DefaultBranch:                           "main",
 		AllowForkWithoutMaximumLimit:            true,
+		StreamArchives:                          true,
 
 		// Repository editor settings
 		Editor: struct {
@@ -177,23 +198,14 @@ var (
 		// Repository upload settings
 		Upload: struct {
 			Enabled      bool
-			TempPath     string
 			AllowedTypes string
 			FileMaxSize  int64
 			MaxFiles     int
 		}{
 			Enabled:      true,
-			TempPath:     "data/tmp/uploads",
 			AllowedTypes: "",
 			FileMaxSize:  50,
 			MaxFiles:     5,
-		},
-
-		// Repository local settings
-		Local: struct {
-			LocalCopyPath string
-		}{
-			LocalCopyPath: "tmp/local-repo",
 		},
 
 		// Pull request settings
@@ -209,8 +221,10 @@ var (
 			DefaultMergeMessageOfficialApproversOnly bool
 			PopulateSquashCommentWithCommitMessages  bool
 			AddCoCommitterTrailers                   bool
-			TestConflictingPatchesWithGitApply       bool
 			RetargetChildrenOnMerge                  bool
+			DelayCheckForInactiveDays                int
+			DefaultDeleteBranchAfterMerge            bool
+			DefaultTitleSource                       string
 		}{
 			WorkInProgressPrefixes: []string{"WIP:", "[WIP]"},
 			// Same as GitHub. See
@@ -226,6 +240,8 @@ var (
 			PopulateSquashCommentWithCommitMessages:  false,
 			AddCoCommitterTrailers:                   true,
 			RetargetChildrenOnMerge:                  true,
+			DelayCheckForInactiveDays:                7,
+			DefaultTitleSource:                       RepoPRTitleSourceAuto,
 		},
 
 		// Issue settings
@@ -240,9 +256,13 @@ var (
 		Release: struct {
 			AllowedTypes     string
 			DefaultPagingNum int
+			FileMaxSize      int64
+			MaxFiles         int64
 		}{
 			AllowedTypes:     "",
 			DefaultPagingNum: 10,
+			FileMaxSize:      2048,
+			MaxFiles:         5,
 		},
 
 		// Signing settings
@@ -250,20 +270,24 @@ var (
 			SigningKey        string
 			SigningName       string
 			SigningEmail      string
+			SigningFormat     string
 			InitialCommit     []string
 			CRUDActions       []string `ini:"CRUD_ACTIONS"`
 			Merges            []string
 			Wiki              []string
 			DefaultTrustModel string
+			TrustedSSHKeys    []string `ini:"TRUSTED_SSH_KEYS"`
 		}{
 			SigningKey:        "default",
 			SigningName:       "",
 			SigningEmail:      "",
+			SigningFormat:     "openpgp", // git.SigningKeyFormatOpenPGP
 			InitialCommit:     []string{"always"},
 			CRUDActions:       []string{"pubkey", "twofa", "parentsigned"},
 			Merges:            []string{"pubkey", "twofa", "basesigned", "commitssigned"},
 			Wiki:              []string{"never"},
 			DefaultTrustModel: "collaborator",
+			TrustedSSHKeys:    []string{},
 		},
 	}
 	RepoRootPath string
@@ -277,9 +301,13 @@ func loadRepositoryFrom(rootCfg ConfigProvider) {
 	Repository.DisableHTTPGit = sec.Key("DISABLE_HTTP_GIT").MustBool()
 	Repository.UseCompatSSHURI = sec.Key("USE_COMPAT_SSH_URI").MustBool()
 	Repository.GoGetCloneURLProtocol = sec.Key("GO_GET_CLONE_URL_PROTOCOL").MustString("https")
+	// MAX_CREATION_LIMIT is a shortcut that sets the default for the two per-type limits below.
+	// USER_/ORG_MAX_CREATION_LIMIT take precedence when explicitly set.
 	Repository.MaxCreationLimit = sec.Key("MAX_CREATION_LIMIT").MustInt(-1)
+	Repository.UserMaxCreationLimit = sec.Key("USER_MAX_CREATION_LIMIT").MustInt(Repository.MaxCreationLimit)
+	Repository.OrgMaxCreationLimit = sec.Key("ORG_MAX_CREATION_LIMIT").MustInt(Repository.MaxCreationLimit)
 	Repository.DefaultBranch = sec.Key("DEFAULT_BRANCH").MustString(Repository.DefaultBranch)
-	RepoRootPath = sec.Key("ROOT").MustString(path.Join(AppDataPath, "gitea-repositories"))
+	RepoRootPath = sec.Key("ROOT").MustString(filepath.Join(AppDataPath, "gitea-repositories"))
 	if !filepath.IsAbs(RepoRootPath) {
 		RepoRootPath = filepath.Join(AppWorkPath, RepoRootPath)
 	} else {
@@ -304,8 +332,6 @@ func loadRepositoryFrom(rootCfg ConfigProvider) {
 		log.Fatal("Failed to map Repository.Editor settings: %v", err)
 	} else if err = rootCfg.Section("repository.upload").MapTo(&Repository.Upload); err != nil {
 		log.Fatal("Failed to map Repository.Upload settings: %v", err)
-	} else if err = rootCfg.Section("repository.local").MapTo(&Repository.Local); err != nil {
-		log.Fatal("Failed to map Repository.Local settings: %v", err)
 	} else if err = rootCfg.Section("repository.pull-request").MapTo(&Repository.PullRequest); err != nil {
 		log.Fatal("Failed to map Repository.PullRequest settings: %v", err)
 	}
@@ -355,10 +381,6 @@ func loadRepositoryFrom(rootCfg ConfigProvider) {
 			Repository.DetectedCharsetScore[charset] = i
 			i++
 		}
-	}
-
-	if !filepath.IsAbs(Repository.Upload.TempPath) {
-		Repository.Upload.TempPath = path.Join(AppWorkPath, Repository.Upload.TempPath)
 	}
 
 	if err := loadRepoArchiveFrom(rootCfg); err != nil {

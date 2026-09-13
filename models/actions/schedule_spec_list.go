@@ -6,9 +6,9 @@ package actions
 import (
 	"context"
 
-	"code.gitea.io/gitea/models/db"
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/modules/container"
+	"gitea.dev/models/db"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/modules/container"
 
 	"xorm.io/builder"
 )
@@ -32,7 +32,7 @@ func (specs SpecList) LoadSchedules(ctx context.Context) error {
 	}
 
 	repoIDs := specs.GetRepoIDs()
-	repos, err := GetReposMapByIDs(ctx, repoIDs)
+	repos, err := repo_model.GetRepositoriesMapByIDs(ctx, repoIDs)
 	if err != nil {
 		return err
 	}

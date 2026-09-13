@@ -6,9 +6,9 @@ package cron
 import (
 	"context"
 
-	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/setting"
-	actions_service "code.gitea.io/gitea/services/actions"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/setting"
+	actions_service "gitea.dev/services/actions"
 )
 
 func initActionsTasks() {
@@ -19,6 +19,7 @@ func initActionsTasks() {
 	registerStopEndlessTasks()
 	registerCancelAbandonedJobs()
 	registerScheduleTasks()
+	registerActionsCleanup()
 }
 
 func registerStopZombieTasks() {
@@ -61,5 +62,15 @@ func registerScheduleTasks() {
 	}, func(ctx context.Context, _ *user_model.User, cfg Config) error {
 		// Call the function to start schedule tasks and pass the context.
 		return actions_service.StartScheduleTasks(ctx)
+	})
+}
+
+func registerActionsCleanup() {
+	RegisterTaskFatal("cleanup_actions", &BaseConfig{
+		Enabled:    true,
+		RunAtStart: false,
+		Schedule:   "@midnight",
+	}, func(ctx context.Context, _ *user_model.User, _ Config) error {
+		return actions_service.Cleanup(ctx)
 	})
 }

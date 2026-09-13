@@ -4,8 +4,8 @@
 package swagger
 
 import (
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/services/forms"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/services/forms"
 )
 
 // not actually a response, just a hack to get go-swagger to include definitions
@@ -36,6 +36,8 @@ type swaggerParameterBodies struct {
 	EditIssueOption api.EditIssueOption
 	// in:body
 	EditDeadlineOption api.EditDeadlineOption
+	// in:body
+	IssueAssigneesOption api.IssueAssigneesOption
 
 	// in:body
 	CreateIssueCommentOption api.CreateIssueCommentOption
@@ -90,6 +92,8 @@ type swaggerParameterBodies struct {
 	// in:body
 	EditRepoOption api.EditRepoOption
 	// in:body
+	RenameBranchRepoOption api.RenameBranchRepoOption
+	// in:body
 	TransferRepoOption api.TransferRepoOption
 	// in:body
 	CreateForkOption api.CreateForkOption
@@ -117,6 +121,12 @@ type swaggerParameterBodies struct {
 	EditAttachmentOptions api.EditAttachmentOptions
 
 	// in:body
+	GetFilesOptions api.GetFilesOptions
+
+	// in:body
+	ApplyDiffPatchFileOptions api.ApplyDiffPatchFileOptions
+
+	// in:body
 	ChangeFilesOptions api.ChangeFilesOptions
 
 	// in:body
@@ -139,12 +149,17 @@ type swaggerParameterBodies struct {
 
 	// in:body
 	CreateBranchRepoOption api.CreateBranchRepoOption
+	// in:body
+	UpdateBranchRepoOption api.UpdateBranchRepoOption
 
 	// in:body
 	CreateBranchProtectionOption api.CreateBranchProtectionOption
 
 	// in:body
 	EditBranchProtectionOption api.EditBranchProtectionOption
+
+	// in:body
+	UpdateBranchProtectionPriories api.UpdateBranchProtectionPriories
 
 	// in:body
 	CreateOAuth2ApplicationOptions api.CreateOAuth2ApplicationOptions
@@ -154,6 +169,9 @@ type swaggerParameterBodies struct {
 
 	// in:body
 	CreatePullReviewComment api.CreatePullReviewComment
+
+	// in:body
+	CreatePullReviewCommentReplyOptions api.CreatePullReviewCommentReplyOptions
 
 	// in:body
 	SubmitPullReviewOptions api.SubmitPullReviewOptions
@@ -169,6 +187,12 @@ type swaggerParameterBodies struct {
 
 	// in:body
 	CreateTagOption api.CreateTagOption
+
+	// in:body
+	CreateTagProtectionOption api.CreateTagProtectionOption
+
+	// in:body
+	EditTagProtectionOption api.EditTagProtectionOption
 
 	// in:body
 	CreateAccessTokenOption api.CreateAccessTokenOption
@@ -198,5 +222,17 @@ type swaggerParameterBodies struct {
 	CreateVariableOption api.CreateVariableOption
 
 	// in:body
+	RenameOrgOption api.RenameOrgOption
+
+	// in:body
+	CreateActionWorkflowDispatch api.CreateActionWorkflowDispatch
+
+	// in:body
 	UpdateVariableOption api.UpdateVariableOption
+
+	// in:body
+	EditActionRunnerOption api.EditActionRunnerOption
+
+	// in:body
+	LockIssueOption api.LockIssueOption
 }

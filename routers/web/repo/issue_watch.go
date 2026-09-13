@@ -5,16 +5,15 @@ package repo
 
 import (
 	"net/http"
-	"strconv"
 
-	issues_model "code.gitea.io/gitea/models/issues"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/services/context"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/templates"
+	"gitea.dev/services/context"
 )
 
 const (
-	tplWatching base.TplName = "repo/issue/view_content/watching"
+	tplWatching templates.TplName = "repo/issue/view_content/watching"
 )
 
 // IssueWatch sets issue watching
@@ -24,7 +23,7 @@ func IssueWatch(ctx *context.Context) {
 		return
 	}
 
-	if !ctx.IsSigned || (ctx.Doer.ID != issue.PosterID && !ctx.Repo.CanReadIssuesOrPulls(issue.IsPull)) {
+	if !ctx.IsSigned || (ctx.Doer.ID != issue.PosterID && !ctx.Repo.Permission.CanReadIssuesOrPulls(issue.IsPull)) {
 		if log.IsTrace() {
 			if ctx.IsSigned {
 				issueType := "issues"
@@ -42,16 +41,11 @@ func IssueWatch(ctx *context.Context) {
 				log.Trace("Permission Denied: Not logged in")
 			}
 		}
-		ctx.Error(http.StatusForbidden)
+		ctx.HTTPError(http.StatusForbidden)
 		return
 	}
 
-	watch, err := strconv.ParseBool(ctx.Req.PostForm.Get("watch"))
-	if err != nil {
-		ctx.ServerError("watch is not bool", err)
-		return
-	}
-
+	watch := ctx.FormBool("watch")
 	if err := issues_model.CreateOrUpdateIssueWatch(ctx, ctx.Doer.ID, issue.ID, watch); err != nil {
 		ctx.ServerError("CreateOrUpdateIssueWatch", err)
 		return

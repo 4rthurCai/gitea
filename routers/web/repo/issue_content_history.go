@@ -6,16 +6,16 @@ package repo
 import (
 	"bytes"
 	"html"
+	"html/template"
 	"net/http"
 	"strings"
 
-	"code.gitea.io/gitea/models/avatars"
-	issues_model "code.gitea.io/gitea/models/issues"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/templates"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/services/context"
+	"gitea.dev/models/avatars"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/modules/htmlutil"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/templates"
+	"gitea.dev/services/context"
 
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
@@ -54,29 +54,25 @@ func GetContentHistoryList(ctx *context.Context) {
 	// value is historyId
 	var results []map[string]any
 	for _, item := range items {
-		var actionText string
+		var actionHTML template.HTML
 		if item.IsDeleted {
-			actionTextDeleted := ctx.Locale.TrString("repo.issues.content_history.deleted")
-			actionText = "<i data-history-is-deleted='1'>" + actionTextDeleted + "</i>"
+			actionHTML = htmlutil.HTMLFormat(`<i data-history-is-deleted="1">%s</i>`, ctx.Locale.TrString("repo.issues.content_history.deleted"))
 		} else if item.IsFirstCreated {
-			actionText = ctx.Locale.TrString("repo.issues.content_history.created")
+			actionHTML = ctx.Locale.Tr("repo.issues.content_history.created")
 		} else {
-			actionText = ctx.Locale.TrString("repo.issues.content_history.edited")
+			actionHTML = ctx.Locale.Tr("repo.issues.content_history.edited")
 		}
 
-		username := item.UserName
-		if setting.UI.DefaultShowFullName && strings.TrimSpace(item.UserFullName) != "" {
-			username = strings.TrimSpace(item.UserFullName)
+		var fullNameHTML template.HTML
+		userName, fullName := item.UserName, strings.TrimSpace(item.UserFullName)
+		if fullName != "" {
+			fullNameHTML = htmlutil.HTMLFormat(` (<span class="tw-inline-flex tw-max-w-[160px]"><span class="gt-ellipsis">%s</span></span>)`, fullName)
 		}
 
-		src := html.EscapeString(item.UserAvatarLink)
-		class := avatars.DefaultAvatarClass + " tw-mr-2"
-		name := html.EscapeString(username)
-		avatarHTML := string(templates.AvatarHTML(src, 28, class, username))
-		timeSinceText := string(timeutil.TimeSinceUnix(item.EditedUnix, ctx.Locale))
-
+		avatarHTML := templates.AvatarHTML(item.UserAvatarLink, 24, avatars.DefaultAvatarClass+" tw-mr-2", userName)
+		timeSinceHTML := templates.TimeSince(item.EditedUnix)
 		results = append(results, map[string]any{
-			"name":  avatarHTML + "<strong>" + name + "</strong> " + actionText + " " + timeSinceText,
+			"name":  htmlutil.HTMLFormat("%s <strong>%s</strong>%s %s %s", avatarHTML, userName, fullNameHTML, actionHTML, timeSinceHTML),
 			"value": item.HistoryID,
 		})
 	}
@@ -92,7 +88,7 @@ func canSoftDeleteContentHistory(ctx *context.Context, issue *issues_model.Issue
 	history *issues_model.ContentHistory,
 ) (canSoftDelete bool) {
 	// CanWrite means the doer can manage the issue/PR list
-	if ctx.Repo.IsOwner() || ctx.Repo.CanWriteIssuesOrPulls(issue.IsPull) {
+	if ctx.Repo.Permission.IsOwner() || ctx.Repo.Permission.CanWriteIssuesOrPulls(issue.IsPull) {
 		canSoftDelete = true
 	} else if ctx.Doer != nil {
 		// for read-only users, they could still post issues or comments,
@@ -156,17 +152,18 @@ func GetContentHistoryDetail(ctx *context.Context) {
 
 	// use chroma to render the diff html
 	diffHTMLBuf := bytes.Buffer{}
-	diffHTMLBuf.WriteString("<pre class='chroma' style='tab-size: 4'>")
+	diffHTMLBuf.WriteString("<pre class='chroma'>")
 	for _, it := range diff {
-		if it.Type == diffmatchpatch.DiffInsert {
+		switch it.Type {
+		case diffmatchpatch.DiffInsert:
 			diffHTMLBuf.WriteString("<span class='gi'>")
 			diffHTMLBuf.WriteString(html.EscapeString(it.Text))
 			diffHTMLBuf.WriteString("</span>")
-		} else if it.Type == diffmatchpatch.DiffDelete {
+		case diffmatchpatch.DiffDelete:
 			diffHTMLBuf.WriteString("<span class='gd'>")
 			diffHTMLBuf.WriteString(html.EscapeString(it.Text))
 			diffHTMLBuf.WriteString("</span>")
-		} else {
+		default:
 			diffHTMLBuf.WriteString(html.EscapeString(it.Text))
 		}
 	}
@@ -187,7 +184,7 @@ func SoftDeleteContentHistory(ctx *context.Context) {
 		return
 	}
 	if ctx.Doer == nil {
-		ctx.NotFound("Require SignIn", nil)
+		ctx.NotFound(nil)
 		return
 	}
 
@@ -203,21 +200,20 @@ func SoftDeleteContentHistory(ctx *context.Context) {
 		return
 	}
 	if history.IssueID != issue.ID {
-		ctx.NotFound("CompareRepoID", issues_model.ErrCommentNotExist{})
+		ctx.NotFound(issues_model.ErrCommentNotExist{})
+		return
+	}
+	if history.CommentID != commentID {
+		ctx.NotFound(issues_model.ErrCommentNotExist{})
 		return
 	}
 	if commentID != 0 {
-		if history.CommentID != commentID {
-			ctx.NotFound("CompareCommentID", issues_model.ErrCommentNotExist{})
-			return
-		}
-
 		if comment, err = issues_model.GetCommentByID(ctx, commentID); err != nil {
 			log.Error("can not get comment for issue content history %v. err=%v", historyID, err)
 			return
 		}
 		if comment.IssueID != issue.ID {
-			ctx.NotFound("CompareIssueID", issues_model.ErrCommentNotExist{})
+			ctx.NotFound(issues_model.ErrCommentNotExist{})
 			return
 		}
 	}

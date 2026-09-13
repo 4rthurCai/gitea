@@ -4,56 +4,52 @@
 package migrations
 
 import (
-	"context"
-	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"testing"
 	"time"
 
-	base "code.gitea.io/gitea/modules/migration"
+	"gitea.dev/models/unittest"
+	base "gitea.dev/modules/migration"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGiteaDownloadRepo(t *testing.T) {
-	// Skip tests if Gitea token is not found
-	giteaToken := os.Getenv("GITEA_TOKEN")
-	if giteaToken == "" {
-		t.Skip("skipped test because GITEA_TOKEN was not in the environment")
-	}
+	token := os.Getenv("GITEA_TEST_OFFICIAL_SITE_TOKEN")
+	liveMode := token != ""
 
-	resp, err := http.Get("https://gitea.com/gitea")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Skipf("Can't reach https://gitea.com, skipping %s", t.Name())
-	}
+	_, callerFile, _, _ := runtime.Caller(0)
+	fixtureDir := filepath.Join(filepath.Dir(callerFile), "_mock_data/TestGiteaDownloadRepo")
+	mockServer := unittest.NewMockWebServer(t, "https://gitea.com", fixtureDir, liveMode)
 
-	downloader, err := NewGiteaDownloader(context.Background(), "https://gitea.com", "gitea/test_repo", "", "", giteaToken)
-	if downloader == nil {
-		t.Fatal("NewGitlabDownloader is nil")
-	}
-	if !assert.NoError(t, err) {
-		t.Fatal("NewGitlabDownloader error occur")
-	}
+	ctx := t.Context()
+	downloader, err := NewGiteaDownloader(ctx, mockServer.URL, "gitea/test_repo", "", "", token)
+	require.NoError(t, err, "NewGiteaDownloader error occur")
+	require.NotNil(t, downloader, "NewGiteaDownloader is nil")
 
-	repo, err := downloader.GetRepoInfo()
+	repo, err := downloader.GetRepoInfo(ctx)
 	assert.NoError(t, err)
 	assertRepositoryEqual(t, &base.Repository{
 		Name:          "test_repo",
 		Owner:         "gitea",
 		IsPrivate:     false,
 		Description:   "Test repository for testing migration from gitea to gitea",
-		CloneURL:      "https://gitea.com/gitea/test_repo.git",
-		OriginalURL:   "https://gitea.com/gitea/test_repo",
+		Website:       mockServer.URL + "/test-repo",
+		CloneURL:      mockServer.URL + "/gitea/test_repo.git",
+		OriginalURL:   mockServer.URL + "/gitea/test_repo",
 		DefaultBranch: "master",
 	}, repo)
 
-	topics, err := downloader.GetTopics()
+	topics, err := downloader.GetTopics(ctx)
 	assert.NoError(t, err)
 	sort.Strings(topics)
-	assert.EqualValues(t, []string{"ci", "gitea", "migration", "test"}, topics)
+	assert.Equal(t, []string{"ci", "gitea", "migration", "test"}, topics)
 
-	labels, err := downloader.GetLabels()
+	labels, err := downloader.GetLabels(ctx)
 	assert.NoError(t, err)
 	assertLabelsEqual(t, []*base.Label{
 		{
@@ -83,27 +79,27 @@ func TestGiteaDownloadRepo(t *testing.T) {
 		},
 	}, labels)
 
-	milestones, err := downloader.GetMilestones()
+	milestones, err := downloader.GetMilestones(ctx)
 	assert.NoError(t, err)
 	assertMilestonesEqual(t, []*base.Milestone{
-		{
-			Title:    "V2 Finalize",
-			Created:  time.Unix(0, 0),
-			Deadline: timePtr(time.Unix(1599263999, 0)),
-			Updated:  timePtr(time.Unix(0, 0)),
-			State:    "open",
-		},
 		{
 			Title:       "V1",
 			Description: "Generate Content",
 			Created:     time.Unix(0, 0),
-			Updated:     timePtr(time.Unix(0, 0)),
-			Closed:      timePtr(time.Unix(1598985406, 0)),
+			Updated:     new(time.Unix(0, 0)),
+			Closed:      new(time.Date(2020, 9, 1, 18, 36, 46, 0, time.UTC)),
 			State:       "closed",
+		},
+		{
+			Title:    "V2 Finalize",
+			Created:  time.Unix(0, 0),
+			Deadline: new(time.Date(2020, 9, 4, 23, 59, 59, 0, time.UTC)),
+			Updated:  new(time.Date(2022, 11, 13, 5, 29, 15, 0, time.UTC)),
+			State:    "open",
 		},
 	}, milestones)
 
-	releases, err := downloader.GetReleases()
+	releases, err := downloader.GetReleases(ctx)
 	assert.NoError(t, err)
 	assertReleasesEqual(t, []*base.Release{
 		{
@@ -117,7 +113,7 @@ func TestGiteaDownloadRepo(t *testing.T) {
 			Published:       time.Date(2020, 9, 1, 18, 2, 43, 0, time.UTC),
 			PublisherID:     689,
 			PublisherName:   "6543",
-			PublisherEmail:  "6543@obermui.de",
+			PublisherEmail:  "689+6543@noreply.gitea.com",
 		},
 		{
 			Name:            "First Release",
@@ -130,17 +126,17 @@ func TestGiteaDownloadRepo(t *testing.T) {
 			Published:       time.Date(2020, 9, 1, 17, 30, 32, 0, time.UTC),
 			PublisherID:     689,
 			PublisherName:   "6543",
-			PublisherEmail:  "6543@obermui.de",
+			PublisherEmail:  "689+6543@noreply.gitea.com",
 		},
 	}, releases)
 
-	issues, isEnd, err := downloader.GetIssues(1, 50)
+	issues, isEnd, err := downloader.GetIssues(ctx, 1, 50)
 	assert.NoError(t, err)
 	assert.True(t, isEnd)
 	assert.Len(t, issues, 7)
-	assert.EqualValues(t, "open", issues[0].State)
+	assert.Equal(t, "open", issues[0].State)
 
-	issues, isEnd, err = downloader.GetIssues(3, 2)
+	issues, isEnd, err = downloader.GetIssues(ctx, 3, 2)
 	assert.NoError(t, err)
 	assert.False(t, isEnd)
 
@@ -152,7 +148,7 @@ func TestGiteaDownloadRepo(t *testing.T) {
 			Milestone:   "V1",
 			PosterID:    -1,
 			PosterName:  "Ghost",
-			PosterEmail: "",
+			PosterEmail: "-1+ghost@noreply.gitea.com",
 			State:       "closed",
 			IsLocked:    true,
 			Created:     time.Unix(1598975321, 0),
@@ -174,7 +170,7 @@ func TestGiteaDownloadRepo(t *testing.T) {
 					Content:  "laugh",
 				},
 			},
-			Closed: timePtr(time.Date(2020, 9, 1, 15, 49, 34, 0, time.UTC)),
+			Closed: new(time.Date(2020, 9, 1, 15, 49, 34, 0, time.UTC)),
 		},
 		{
 			Number:      2,
@@ -183,7 +179,7 @@ func TestGiteaDownloadRepo(t *testing.T) {
 			Milestone:   "",
 			PosterID:    689,
 			PosterName:  "6543",
-			PosterEmail: "6543@obermui.de",
+			PosterEmail: "689+6543@noreply.gitea.com",
 			State:       "closed",
 			IsLocked:    false,
 			Created:     time.Unix(1598919780, 0),
@@ -193,18 +189,18 @@ func TestGiteaDownloadRepo(t *testing.T) {
 				Color:       "d4c5f9",
 				Description: "",
 			}},
-			Closed: timePtr(time.Unix(1598969497, 0)),
+			Closed: new(time.Unix(1598969497, 0)),
 		},
 	}, issues)
 
-	comments, _, err := downloader.GetComments(&base.Issue{Number: 4, ForeignIndex: 4})
+	comments, _, err := downloader.GetComments(ctx, &base.Issue{Number: 4, ForeignIndex: 4})
 	assert.NoError(t, err)
 	assertCommentsEqual(t, []*base.Comment{
 		{
 			IssueIndex:  4,
 			PosterID:    689,
 			PosterName:  "6543",
-			PosterEmail: "6543@obermui.de",
+			PosterEmail: "689+6543@noreply.gitea.com",
 			Created:     time.Unix(1598975370, 0),
 			Updated:     time.Unix(1599070865, 0),
 			Content:     "a really good question!\n\nIt is the used as TESTSET for gitea2gitea repo migration function",
@@ -213,18 +209,18 @@ func TestGiteaDownloadRepo(t *testing.T) {
 			IssueIndex:  4,
 			PosterID:    -1,
 			PosterName:  "Ghost",
-			PosterEmail: "",
+			PosterEmail: "-1+ghost@noreply.gitea.com",
 			Created:     time.Unix(1598975393, 0),
 			Updated:     time.Unix(1598975393, 0),
 			Content:     "Oh!",
 		},
 	}, comments)
 
-	prs, isEnd, err := downloader.GetPullRequests(1, 50)
+	prs, isEnd, err := downloader.GetPullRequests(ctx, 1, 50)
 	assert.NoError(t, err)
 	assert.True(t, isEnd)
 	assert.Len(t, prs, 6)
-	prs, isEnd, err = downloader.GetPullRequests(1, 3)
+	prs, isEnd, err = downloader.GetPullRequests(ctx, 1, 3)
 	assert.NoError(t, err)
 	assert.False(t, isEnd)
 	assert.Len(t, prs, 3)
@@ -232,7 +228,7 @@ func TestGiteaDownloadRepo(t *testing.T) {
 		Number:      12,
 		PosterID:    689,
 		PosterName:  "6543",
-		PosterEmail: "6543@obermui.de",
+		PosterEmail: "689+6543@noreply.gitea.com",
 		Title:       "Dont Touch",
 		Content:     "\r\nadd dont touch note",
 		Milestone:   "V2 Finalize",
@@ -240,7 +236,7 @@ func TestGiteaDownloadRepo(t *testing.T) {
 		IsLocked:    false,
 		Created:     time.Unix(1598982759, 0),
 		Updated:     time.Unix(1599023425, 0),
-		Closed:      timePtr(time.Unix(1598982934, 0)),
+		Closed:      new(time.Unix(1598982933, 0)),
 		Assignees:   []string{"techknowlogick"},
 		Base: base.PullRequestBranch{
 			CloneURL:  "",
@@ -250,19 +246,19 @@ func TestGiteaDownloadRepo(t *testing.T) {
 			OwnerName: "gitea",
 		},
 		Head: base.PullRequestBranch{
-			CloneURL:  "https://gitea.com/6543-forks/test_repo.git",
+			CloneURL:  mockServer.URL + "/6543-forks/test_repo.git",
 			Ref:       "refs/pull/12/head",
 			SHA:       "b6ab5d9ae000b579a5fff03f92c486da4ddf48b6",
 			RepoName:  "test_repo",
 			OwnerName: "6543-forks",
 		},
 		Merged:         true,
-		MergedTime:     timePtr(time.Unix(1598982934, 0)),
+		MergedTime:     new(time.Unix(1598982934, 0)),
 		MergeCommitSHA: "827aa28a907853e5ddfa40c8f9bc52471a2685fd",
-		PatchURL:       "https://gitea.com/gitea/test_repo/pulls/12.patch",
+		PatchURL:       mockServer.URL + "/gitea/test_repo/pulls/12.patch",
 	}, prs[1])
 
-	reviews, err := downloader.GetReviews(&base.Issue{Number: 7, ForeignIndex: 7})
+	reviews, err := downloader.GetReviews(ctx, &base.Issue{Number: 7, ForeignIndex: 7})
 	assert.NoError(t, err)
 	assertReviewsEqual(t, []*base.Review{
 		{
@@ -286,7 +282,7 @@ func TestGiteaDownloadRepo(t *testing.T) {
 					PosterID:  689,
 					Reactions: nil,
 					CreatedAt: time.Date(2020, 9, 1, 16, 12, 58, 0, time.UTC),
-					UpdatedAt: time.Date(2020, 9, 1, 16, 12, 58, 0, time.UTC),
+					UpdatedAt: time.Date(2024, 6, 3, 1, 18, 36, 0, time.UTC),
 				},
 			},
 		},

@@ -7,14 +7,33 @@ import (
 	"context"
 	"fmt"
 
-	"code.gitea.io/gitea/models"
-	auth_model "code.gitea.io/gitea/models/auth"
-	user_model "code.gitea.io/gitea/models/user"
-	password_module "code.gitea.io/gitea/modules/auth/password"
-	"code.gitea.io/gitea/modules/optional"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/structs"
+	auth_model "gitea.dev/models/auth"
+	user_model "gitea.dev/models/user"
+	password_module "gitea.dev/modules/auth/password"
+	"gitea.dev/modules/optional"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/structs"
 )
+
+type UpdateOptionField[T any] struct {
+	FieldValue T
+	FromSync   bool
+}
+
+func UpdateOptionFieldFromValue[T any](value T) optional.Option[UpdateOptionField[T]] {
+	return optional.Some(UpdateOptionField[T]{FieldValue: value})
+}
+
+func UpdateOptionFieldFromSync[T any](value T) optional.Option[UpdateOptionField[T]] {
+	return optional.Some(UpdateOptionField[T]{FieldValue: value, FromSync: true})
+}
+
+func UpdateOptionFieldFromPtr[T any](value *T) optional.Option[UpdateOptionField[T]] {
+	if value == nil {
+		return optional.None[UpdateOptionField[T]]()
+	}
+	return UpdateOptionFieldFromValue(*value)
+}
 
 type UpdateOptions struct {
 	KeepEmailPrivate             optional.Option[bool]
@@ -33,7 +52,7 @@ type UpdateOptions struct {
 	DiffViewStyle                optional.Option[string]
 	AllowCreateOrganization      optional.Option[bool]
 	IsActive                     optional.Option[bool]
-	IsAdmin                      optional.Option[bool]
+	IsAdmin                      optional.Option[UpdateOptionField[bool]]
 	EmailNotificationsPreference optional.Option[string]
 	SetLastLogin                 bool
 	RepoAdminChangeTeamAccess    optional.Option[bool]
@@ -112,16 +131,22 @@ func UpdateUser(ctx context.Context, u *user_model.User, opts *UpdateOptions) er
 		cols = append(cols, "is_restricted")
 	}
 	if opts.IsAdmin.Has() {
-		if !opts.IsAdmin.Value() && user_model.IsLastAdminUser(ctx, u) {
-			return models.ErrDeleteLastAdminUser{UID: u.ID}
+		if opts.IsAdmin.Value().FieldValue /* true */ {
+			u.IsAdmin = opts.IsAdmin.Value().FieldValue // set IsAdmin=true
+			cols = append(cols, "is_admin")
+		} else if !user_model.IsLastAdminUser(ctx, u) /* not the last admin */ {
+			u.IsAdmin = opts.IsAdmin.Value().FieldValue // it's safe to change it from false to true (not the last admin)
+			cols = append(cols, "is_admin")
+		} else /* IsAdmin=false but this is the last admin user */ { //nolint:gocritic // make it easier to read
+			if !opts.IsAdmin.Value().FromSync {
+				return user_model.ErrDeleteLastAdminUser{UID: u.ID}
+			}
+			// else: syncing from external-source, this user is the last admin, so skip the "IsAdmin=false" change
 		}
-
-		u.IsAdmin = opts.IsAdmin.Value()
-
-		cols = append(cols, "is_admin")
 	}
 
-	if opts.Visibility.Has() {
+	// only validate and persist the visibility when it actually changes
+	if opts.Visibility.Has() && opts.Visibility.Value() != u.Visibility {
 		if !u.IsOrganization() && !setting.Service.AllowedUserVisibilityModesSlice.IsAllowedVisibility(opts.Visibility.Value()) {
 			return fmt.Errorf("visibility mode not allowed: %s", opts.Visibility.Value().String())
 		}
@@ -158,6 +183,10 @@ func UpdateUser(ctx context.Context, u *user_model.User, opts *UpdateOptions) er
 		cols = append(cols, "last_login_unix")
 	}
 
+	// A request containing only fork-disabled fields must remain a no-op.
+	if len(cols) == 0 {
+		return nil
+	}
 	return user_model.UpdateUserCols(ctx, u, cols...)
 }
 

@@ -1,12 +1,12 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-package v1_16 //nolint
+package v1_16
 
 import (
 	"testing"
 
-	"code.gitea.io/gitea/models/migrations/base"
+	"gitea.dev/models/migrations/migrationtest"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -31,7 +31,7 @@ func Test_AddRepoIDForAttachment(t *testing.T) {
 	}
 
 	// Prepare and load the testing database
-	x, deferrable := base.PrepareTestEnv(t, 0, new(Attachment), new(Issue), new(Release))
+	x, deferrable := migrationtest.PrepareTestEnv(t, 0, new(Attachment), new(Issue), new(Release))
 	defer deferrable()
 	if x == nil || t.Failed() {
 		return
@@ -56,25 +56,25 @@ func Test_AddRepoIDForAttachment(t *testing.T) {
 	err := x.Table("attachment").Where("issue_id > 0").Find(&issueAttachments)
 	assert.NoError(t, err)
 	for _, attach := range issueAttachments {
-		assert.Greater(t, attach.RepoID, int64(0))
-		assert.Greater(t, attach.IssueID, int64(0))
+		assert.Positive(t, attach.RepoID)
+		assert.Positive(t, attach.IssueID)
 		var issue Issue
 		has, err := x.ID(attach.IssueID).Get(&issue)
 		assert.NoError(t, err)
 		assert.True(t, has)
-		assert.EqualValues(t, attach.RepoID, issue.RepoID)
+		assert.Equal(t, attach.RepoID, issue.RepoID)
 	}
 
 	var releaseAttachments []*NewAttachment
 	err = x.Table("attachment").Where("release_id > 0").Find(&releaseAttachments)
 	assert.NoError(t, err)
 	for _, attach := range releaseAttachments {
-		assert.Greater(t, attach.RepoID, int64(0))
-		assert.Greater(t, attach.ReleaseID, int64(0))
+		assert.Positive(t, attach.RepoID)
+		assert.Positive(t, attach.ReleaseID)
 		var release Release
 		has, err := x.ID(attach.ReleaseID).Get(&release)
 		assert.NoError(t, err)
 		assert.True(t, has)
-		assert.EqualValues(t, attach.RepoID, release.RepoID)
+		assert.Equal(t, attach.RepoID, release.RepoID)
 	}
 }

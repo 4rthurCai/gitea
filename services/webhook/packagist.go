@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"net/http"
 
-	webhook_model "code.gitea.io/gitea/models/webhook"
-	"code.gitea.io/gitea/modules/json"
-	"code.gitea.io/gitea/modules/log"
-	api "code.gitea.io/gitea/modules/structs"
-	webhook_module "code.gitea.io/gitea/modules/webhook"
+	webhook_model "gitea.dev/models/webhook"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/log"
+	api "gitea.dev/modules/structs"
+	webhook_module "gitea.dev/modules/webhook"
 )
 
 type (
@@ -38,6 +38,10 @@ func GetPackagistHook(w *webhook_model.Webhook) *PackagistMeta {
 		log.Error("webhook.GetPackagistHook(%d): %v", w.ID, err)
 	}
 	return s
+}
+
+type packagistConvertor struct {
+	PackageURL string
 }
 
 // Create implements PayloadConvertor Create method
@@ -106,19 +110,29 @@ func (pc packagistConvertor) Package(_ *api.PackagePayload) (PackagistPayload, e
 	return PackagistPayload{}, nil
 }
 
-type packagistConvertor struct {
-	PackageURL string
+func (pc packagistConvertor) Status(_ *api.CommitStatusPayload) (PackagistPayload, error) {
+	return PackagistPayload{}, nil
 }
 
-var _ payloadConvertor[PackagistPayload] = packagistConvertor{}
+func (pc packagistConvertor) WorkflowRun(_ *api.WorkflowRunPayload) (PackagistPayload, error) {
+	return PackagistPayload{}, nil
+}
 
-func newPackagistRequest(ctx context.Context, w *webhook_model.Webhook, t *webhook_model.HookTask) (*http.Request, []byte, error) {
+func (pc packagistConvertor) WorkflowJob(_ *api.WorkflowJobPayload) (PackagistPayload, error) {
+	return PackagistPayload{}, nil
+}
+
+func newPackagistRequest(_ context.Context, w *webhook_model.Webhook, t *webhook_model.HookTask) (*http.Request, []byte, error) {
 	meta := &PackagistMeta{}
 	if err := json.Unmarshal([]byte(w.Meta), meta); err != nil {
 		return nil, nil, fmt.Errorf("newpackagistRequest meta json: %w", err)
 	}
-	pc := packagistConvertor{
+	var pc payloadConvertor[PackagistPayload] = packagistConvertor{
 		PackageURL: meta.PackageURL,
 	}
 	return newJSONRequest(pc, w, t, true)
+}
+
+func init() {
+	RegisterWebhookRequester(webhook_module.PACKAGIST, newPackagistRequest)
 }

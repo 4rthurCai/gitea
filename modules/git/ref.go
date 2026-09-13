@@ -7,7 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
 )
 
 const (
@@ -72,12 +73,22 @@ const ForPrefix = "refs/for/"
 // RefName represents a full git reference name
 type RefName string
 
+const RefNameHead = "HEAD"
+
 func RefNameFromBranch(shortName string) RefName {
 	return RefName(BranchPrefix + shortName)
 }
 
 func RefNameFromTag(shortName string) RefName {
 	return RefName(TagPrefix + shortName)
+}
+
+func RefNameFromCommit(shortName string) RefName {
+	if !isStringLowerHex(shortName) {
+		setting.PanicInDevOrTesting("BUG! invalid commit id %s", shortName)
+		return RefName("refs/invalid-commit/" + shortName)
+	}
+	return RefName(shortName)
 }
 
 func (ref RefName) String() string {
@@ -105,8 +116,8 @@ func (ref RefName) IsFor() bool {
 }
 
 func (ref RefName) nameWithoutPrefix(prefix string) string {
-	if strings.HasPrefix(string(ref), prefix) {
-		return strings.TrimPrefix(string(ref), prefix)
+	if after, ok := strings.CutPrefix(string(ref), prefix); ok {
+		return after
 	}
 	return ""
 }
@@ -142,7 +153,6 @@ func (ref RefName) RemoteName() string {
 
 // ShortName returns the short name of the reference name
 func (ref RefName) ShortName() string {
-	refName := string(ref)
 	if ref.IsBranch() {
 		return ref.BranchName()
 	}
@@ -158,8 +168,7 @@ func (ref RefName) ShortName() string {
 	if ref.IsFor() {
 		return ref.ForBranchName()
 	}
-
-	return refName
+	return string(ref) // usually it is a commit ID, or "HEAD"
 }
 
 // RefGroup returns the group type of the reference
@@ -183,32 +192,52 @@ func (ref RefName) RefGroup() string {
 	return ""
 }
 
+// RefType is a simple ref type of the reference, it is used for UI and webhooks
+type RefType string
+
+const (
+	RefTypeBranch RefType = "branch"
+	RefTypeTag    RefType = "tag"
+	RefTypeCommit RefType = "commit"
+)
+
 // RefType returns the simple ref type of the reference, e.g. branch, tag
 // It's different from RefGroup, which is using the name of the directory under .git/refs
-// Here we using branch but not heads, using tag but not tags
-func (ref RefName) RefType() string {
-	var refType string
-	if ref.IsBranch() {
-		refType = "branch"
-	} else if ref.IsTag() {
-		refType = "tag"
+func (ref RefName) RefType() RefType {
+	switch {
+	case ref.IsBranch():
+		return RefTypeBranch
+	case ref.IsTag():
+		return RefTypeTag
+	case IsStringLikelyCommitID(nil, string(ref), 6):
+		return RefTypeCommit
 	}
-	return refType
+	return ""
 }
 
-// RefURL returns the absolute URL for a ref in a repository
-func RefURL(repoURL, ref string) string {
-	refFullName := RefName(ref)
-	refName := util.PathEscapeSegments(refFullName.ShortName())
-	switch {
-	case refFullName.IsBranch():
-		return repoURL + "/src/branch/" + refName
-	case refFullName.IsTag():
-		return repoURL + "/src/tag/" + refName
-	case !Sha1ObjectFormat.IsValid(ref):
-		// assume they mean a branch
-		return repoURL + "/src/branch/" + refName
-	default:
-		return repoURL + "/src/commit/" + refName
+// RefWebLinkPath returns a path for the reference that can be used in a web link:
+// * "branch/<branch_name>"
+// * "tag/<tag_name>"
+// * "commit/<commit_id>"
+// It returns an empty string if the reference is not a branch, tag or commit.
+func (ref RefName) RefWebLinkPath() string {
+	refType := ref.RefType()
+	if refType == "" {
+		return ""
 	}
+	return string(refType) + "/" + util.PathEscapeSegments(ref.ShortName())
+}
+
+func ParseRefSuffix(ref string) (refName, refSuffix string) {
+	// Partially support https://git-scm.com/docs/gitrevisions
+	suffixIdx := -1 // earliest suffix mark, so a combined suffix like "main~2^" stays intact
+	for _, mark := range []string{"@{", "^", "~"} {
+		if idx := strings.Index(ref, mark); idx != -1 && (suffixIdx == -1 || idx < suffixIdx) {
+			suffixIdx = idx
+		}
+	}
+	if suffixIdx == -1 {
+		return ref, ""
+	}
+	return ref[:suffixIdx], ref[suffixIdx:]
 }

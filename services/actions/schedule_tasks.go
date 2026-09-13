@@ -6,17 +6,22 @@ package actions
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
-	actions_model "code.gitea.io/gitea/models/actions"
-	"code.gitea.io/gitea/models/db"
-	repo_model "code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/models/unit"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/timeutil"
-	webhook_module "code.gitea.io/gitea/modules/webhook"
-
-	"github.com/nektos/act/pkg/jobparser"
+	actions_model "gitea.dev/models/actions"
+	"gitea.dev/models/db"
+	"gitea.dev/models/organization"
+	perm_model "gitea.dev/models/perm"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unit"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/timeutil"
+	webhook_module "gitea.dev/modules/webhook"
+	"gitea.dev/services/convert"
 )
 
 // StartScheduleTasks start the task
@@ -52,20 +57,6 @@ func startTasks(ctx context.Context) error {
 
 		// Loop through each spec and create a schedule task for it
 		for _, row := range specs {
-			// cancel running jobs if the event is push
-			if row.Schedule.Event == webhook_module.HookEventPush {
-				// cancel running jobs of the same workflow
-				if err := actions_model.CancelPreviousJobs(
-					ctx,
-					row.RepoID,
-					row.Schedule.Ref,
-					row.Schedule.WorkflowID,
-					webhook_module.HookEventSchedule,
-				); err != nil {
-					log.Error("CancelPreviousJobs: %v", err)
-				}
-			}
-
 			if row.Repo.IsArchived {
 				// Skip if the repo is archived
 				continue
@@ -83,7 +74,7 @@ func startTasks(ctx context.Context) error {
 				continue
 			}
 
-			if err := CreateScheduleTask(ctx, row.Schedule); err != nil {
+			if err := CreateScheduleTask(ctx, row); err != nil {
 				log.Error("CreateScheduleTask: %v", err)
 				return err
 			}
@@ -113,9 +104,24 @@ func startTasks(ctx context.Context) error {
 	return nil
 }
 
-// CreateScheduleTask creates a scheduled task from a cron action schedule.
+// CreateScheduleTask creates a scheduled task from a cron action schedule spec.
 // It creates an action run based on the schedule, inserts it into the database, and creates commit statuses for each job.
-func CreateScheduleTask(ctx context.Context, cron *actions_model.ActionSchedule) error {
+func CreateScheduleTask(ctx context.Context, spec *actions_model.ActionScheduleSpec) error {
+	cron := spec.Schedule
+
+	// Scheduled runs carry no webhook payload; synthesize what github.event.* expects.
+	if err := spec.Repo.LoadOwner(ctx); err != nil {
+		return fmt.Errorf("LoadOwner: %w", err)
+	}
+	fields := map[string]any{
+		"repository": convert.ToRepo(ctx, spec.Repo, access_model.Permission{AccessMode: perm_model.AccessModeRead}),
+		"sender":     convert.ToUser(ctx, user_model.NewActionsUser(), nil),
+	}
+	if spec.Repo.Owner.IsOrganization() {
+		fields["organization"] = convert.ToOrganization(ctx, organization.OrgFromUser(spec.Repo.Owner))
+	}
+	eventPayload := withScheduleInEventPayload(cron.EventPayload, spec.Spec, fields)
+
 	// Create a new action run based on the schedule
 	run := &actions_model.ActionRun{
 		Title:         cron.Title,
@@ -126,29 +132,52 @@ func CreateScheduleTask(ctx context.Context, cron *actions_model.ActionSchedule)
 		Ref:           cron.Ref,
 		CommitSHA:     cron.CommitSHA,
 		Event:         cron.Event,
-		EventPayload:  cron.EventPayload,
+		EventPayload:  eventPayload,
 		TriggerEvent:  string(webhook_module.HookEventSchedule),
 		ScheduleID:    cron.ID,
 		Status:        actions_model.StatusWaiting,
+		// schedule runs the repo's own workflow at the recorded commit
+		WorkflowRepoID:    cron.RepoID,
+		WorkflowCommitSHA: cron.CommitSHA,
 	}
 
-	vars, err := actions_model.GetVariablesOfRun(ctx, run)
-	if err != nil {
-		log.Error("GetVariablesOfRun: %v", err)
-		return err
-	}
-
-	// Parse the workflow specification from the cron schedule
-	workflows, err := jobparser.Parse(cron.Content, jobparser.WithVars(vars))
-	if err != nil {
-		return err
-	}
-
+	// FIXME cron.Content might be outdated if the workflow file has been changed.
+	// Load the latest sha from default branch
 	// Insert the action run and its associated jobs into the database
-	if err := actions_model.InsertRun(ctx, run, workflows); err != nil {
+	if err := PrepareRunAndInsert(ctx, cron.Content, run, nil); err != nil {
 		return err
 	}
 
 	// Return nil if no errors occurred
 	return nil
+}
+
+func withScheduleInEventPayload(eventPayload, schedule string, fields map[string]any) string {
+	if schedule == "" {
+		return eventPayload
+	}
+
+	// eventPayload originates from json.Marshal(input.Payload) in handleSchedules,
+	// so a nil payload is stored as the literal "null" and pre-existing rows may be
+	// empty. Both cases start from a fresh map so the schedule field can still be set.
+	var event map[string]any
+	if eventPayload != "" {
+		if err := json.Unmarshal([]byte(eventPayload), &event); err != nil {
+			log.Error("withScheduleInEventPayload: unmarshal: %v", err)
+			return eventPayload
+		}
+	}
+	if event == nil {
+		event = map[string]any{}
+	}
+
+	maps.Copy(event, fields)
+	event["schedule"] = schedule
+	updatedPayload, err := json.Marshal(event)
+	if err != nil {
+		log.Error("withScheduleInEventPayload: marshal: %v", err)
+		return eventPayload
+	}
+
+	return string(updatedPayload)
 }

@@ -4,79 +4,60 @@
 package context
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
-	"code.gitea.io/gitea/modules/httplib"
-	"code.gitea.io/gitea/modules/json"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/optional"
-	"code.gitea.io/gitea/modules/translation"
-	"code.gitea.io/gitea/modules/web/middleware"
-
-	"github.com/go-chi/chi/v5"
+	"gitea.dev/modules/httplib"
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/reqctx"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/translation"
+	"gitea.dev/modules/util"
+	"gitea.dev/modules/web/middleware"
 )
 
-type contextValuePair struct {
-	key     any
-	valueFn func() any
-}
+type BaseContextKeyType struct{}
 
+var BaseContextKey BaseContextKeyType
+
+// Base is the base context for all web handlers
+// ATTENTION: This struct should never be manually constructed in routes/services,
+// it has many internal details which should be carefully prepared by the framework.
+// If it is abused, it would cause strange bugs like panic/resource-leak.
 type Base struct {
-	originCtx     context.Context
-	contextValues []contextValuePair
+	reqctx.RequestContext
 
 	Resp ResponseWriter
 	Req  *http.Request
 
 	// Data is prepared by ContextDataStore middleware, this field only refers to the pre-created/prepared ContextData.
 	// Although it's mainly used for MVC templates, sometimes it's also used to pass data between middlewares/handler
-	Data middleware.ContextData
+	Data reqctx.ContextData
 
 	// Locale is mainly for Web context, although the API context also uses it in some cases: message response, form validation
 	Locale translation.Locale
 }
 
-func (b *Base) Deadline() (deadline time.Time, ok bool) {
-	return b.originCtx.Deadline()
-}
+var ParseMultipartFormMaxMemory = int64(32 << 20)
 
-func (b *Base) Done() <-chan struct{} {
-	return b.originCtx.Done()
-}
-
-func (b *Base) Err() error {
-	return b.originCtx.Err()
-}
-
-func (b *Base) Value(key any) any {
-	for _, pair := range b.contextValues {
-		if pair.key == key {
-			return pair.valueFn()
+func (b *Base) ParseMultipartForm() bool {
+	err := b.Req.ParseMultipartForm(ParseMultipartFormMaxMemory)
+	if err != nil {
+		// TODO: all errors caused by client side should be ignored (connection closed).
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			// Errors caused by server side (disk full) should be logged.
+			log.Error("Failed to parse request multipart form for %s: %v", b.Req.RequestURI, err)
 		}
+		b.HTTPError(http.StatusInternalServerError, "failed to parse request multipart form")
+		return false
 	}
-	return b.originCtx.Value(key)
-}
-
-func (b *Base) AppendContextValueFunc(key any, valueFn func() any) any {
-	b.contextValues = append(b.contextValues, contextValuePair{key, valueFn})
-	return b
-}
-
-func (b *Base) AppendContextValue(key, value any) any {
-	b.contextValues = append(b.contextValues, contextValuePair{key, func() any { return value }})
-	return b
-}
-
-func (b *Base) GetData() middleware.ContextData {
-	return b.Data
+	return true
 }
 
 // AppendAccessControlExposeHeaders append headers by name to "Access-Control-Expose-Headers" header
@@ -91,7 +72,7 @@ func (b *Base) AppendAccessControlExposeHeaders(names ...string) {
 
 // SetTotalCountHeader set "X-Total-Count" header
 func (b *Base) SetTotalCountHeader(total int64) {
-	b.RespHeader().Set("X-Total-Count", fmt.Sprint(total))
+	b.RespHeader().Set("X-Total-Count", strconv.FormatInt(total, 10))
 	b.AppendAccessControlExposeHeaders("X-Total-Count")
 }
 
@@ -119,8 +100,9 @@ func (b *Base) RespHeader() http.Header {
 	return b.Resp.Header()
 }
 
-// Error returned an error to web browser
-func (b *Base) Error(status int, contents ...string) {
+// HTTPError returned an error to web browser
+// FIXME: many calls to this HTTPError are not right: it shouldn't expose err.Error() directly, it doesn't accept more than one content
+func (b *Base) HTTPError(status int, contents ...string) {
 	v := http.StatusText(status)
 	if len(contents) > 0 {
 		v = contents[0]
@@ -140,89 +122,6 @@ func (b *Base) JSON(status int, content any) {
 // RemoteAddr returns the client machine ip address
 func (b *Base) RemoteAddr() string {
 	return b.Req.RemoteAddr
-}
-
-// Params returns the param on route
-func (b *Base) Params(p string) string {
-	s, _ := url.PathUnescape(chi.URLParam(b.Req, strings.TrimPrefix(p, ":")))
-	return s
-}
-
-func (b *Base) PathParamRaw(p string) string {
-	return chi.URLParam(b.Req, strings.TrimPrefix(p, ":"))
-}
-
-// ParamsInt64 returns the param on route as int64
-func (b *Base) ParamsInt64(p string) int64 {
-	v, _ := strconv.ParseInt(b.Params(p), 10, 64)
-	return v
-}
-
-// SetParams set params into routes
-func (b *Base) SetParams(k, v string) {
-	chiCtx := chi.RouteContext(b)
-	chiCtx.URLParams.Add(strings.TrimPrefix(k, ":"), url.PathEscape(v))
-}
-
-// FormString returns the first value matching the provided key in the form as a string
-func (b *Base) FormString(key string) string {
-	return b.Req.FormValue(key)
-}
-
-// FormStrings returns a string slice for the provided key from the form
-func (b *Base) FormStrings(key string) []string {
-	if b.Req.Form == nil {
-		if err := b.Req.ParseMultipartForm(32 << 20); err != nil {
-			return nil
-		}
-	}
-	if v, ok := b.Req.Form[key]; ok {
-		return v
-	}
-	return nil
-}
-
-// FormTrim returns the first value for the provided key in the form as a space trimmed string
-func (b *Base) FormTrim(key string) string {
-	return strings.TrimSpace(b.Req.FormValue(key))
-}
-
-// FormInt returns the first value for the provided key in the form as an int
-func (b *Base) FormInt(key string) int {
-	v, _ := strconv.Atoi(b.Req.FormValue(key))
-	return v
-}
-
-// FormInt64 returns the first value for the provided key in the form as an int64
-func (b *Base) FormInt64(key string) int64 {
-	v, _ := strconv.ParseInt(b.Req.FormValue(key), 10, 64)
-	return v
-}
-
-// FormBool returns true if the value for the provided key in the form is "1", "true" or "on"
-func (b *Base) FormBool(key string) bool {
-	s := b.Req.FormValue(key)
-	v, _ := strconv.ParseBool(s)
-	v = v || strings.EqualFold(s, "on")
-	return v
-}
-
-// FormOptionalBool returns an optional.Some(true) or optional.Some(false) if the value
-// for the provided key exists in the form else it returns optional.None[bool]()
-func (b *Base) FormOptionalBool(key string) optional.Option[bool] {
-	value := b.Req.FormValue(key)
-	if len(value) == 0 {
-		return optional.None[bool]()
-	}
-	s := b.Req.FormValue(key)
-	v, _ := strconv.ParseBool(s)
-	v = v || strings.EqualFold(s, "on")
-	return optional.Some(v)
-}
-
-func (b *Base) SetFormString(key, value string) {
-	_ = b.Req.FormValue(key) // force parse form
-	b.Req.Form.Set(key, value)
 }
 
 // PlainTextBytes renders bytes as plain text
@@ -249,10 +148,7 @@ func (b *Base) PlainText(status int, text string) {
 
 // Redirect redirects the request
 func (b *Base) Redirect(location string, status ...int) {
-	code := http.StatusSeeOther
-	if len(status) == 1 {
-		code = status[0]
-	}
+	code := util.OptionalArg(status, http.StatusSeeOther)
 
 	if !httplib.IsRelativeURL(location) {
 		// Some browsers (Safari) have buggy behavior for Cookie + Cache + External Redirection, eg: /my-path => https://other/path
@@ -263,34 +159,25 @@ func (b *Base) Redirect(location string, status ...int) {
 		// So in this case, we should remove the session cookie from the response header
 		removeSessionCookieHeader(b.Resp)
 	}
-	// in case the request is made by htmx, have it redirect the browser instead of trying to follow the redirect inside htmx
-	if b.Req.Header.Get("HX-Request") == "true" {
-		b.Resp.Header().Set("HX-Redirect", location)
-		// we have to return a non-redirect status code so XMLHTTPRequest will not immediately follow the redirect
-		// so as to give htmx redirect logic a chance to run
-		b.Status(http.StatusNoContent)
+	// In case the request is made by "fetch-action" module, make JS redirect to the new location
+	// Otherwise, the JS fetch will follow the redirection and read a "login" page, embed it to the current page, which is not expected.
+	if b.Req.Header.Get("X-Gitea-Fetch-Action") != "" {
+		b.JSON(http.StatusOK, map[string]any{"redirect": location})
 		return
 	}
 	http.Redirect(b.Resp, b.Req, location, code)
 }
 
-type ServeHeaderOptions httplib.ServeHeaderOptions
+type ServeHeaderOptions = httplib.ServeHeaderOptions
 
-func (b *Base) SetServeHeaders(opt *ServeHeaderOptions) {
-	httplib.ServeSetHeaders(b.Resp, (*httplib.ServeHeaderOptions)(opt))
+func (b *Base) SetServeHeaders(opts ServeHeaderOptions) {
+	httplib.ServeSetHeaders(b.Resp, opts)
 }
 
 // ServeContent serves content to http request
-func (b *Base) ServeContent(r io.ReadSeeker, opts *ServeHeaderOptions) {
-	httplib.ServeSetHeaders(b.Resp, (*httplib.ServeHeaderOptions)(opts))
+func (b *Base) ServeContent(r io.ReadSeeker, opts ServeHeaderOptions) {
+	httplib.ServeSetHeaders(b.Resp, opts)
 	http.ServeContent(b.Resp, b.Req, opts.Filename, opts.LastModified, r)
-}
-
-// Close frees all resources hold by Context
-func (b *Base) cleanUp() {
-	if b.Req != nil && b.Req.MultipartForm != nil {
-		_ = b.Req.MultipartForm.RemoveAll() // remove the temp files buffered to tmp directory
-	}
 }
 
 func (b *Base) Tr(msg string, args ...any) template.HTML {
@@ -301,16 +188,48 @@ func (b *Base) TrN(cnt any, key1, keyN string, args ...any) template.HTML {
 	return b.Locale.TrN(cnt, key1, keyN, args...)
 }
 
-func NewBaseContext(resp http.ResponseWriter, req *http.Request) (b *Base, closeFunc func()) {
-	b = &Base{
-		originCtx: req.Context(),
-		Req:       req,
-		Resp:      WrapResponseWriter(resp),
-		Locale:    middleware.Locale(resp, req),
-		Data:      middleware.GetContextData(req.Context()),
+func CspScriptNonce(ctx reqctx.RequestContext) (ret string) {
+	// Generate a random nonce for each request and cache it in the context to make it usable during the whole rendering process.
+	//
+	// Some "<script>" tags are not in the CSP context, so they don't need nonce,
+	// these tags are written as "<script nonce>" to help developers to know that "no script nonce attribute is missing"
+	// (e.g.: when they grep the codebase for "script" tags)
+	ret, _ = ctx.Value("_cspScriptNonce").(string)
+	if ret == "" {
+		ret = util.FastCryptoRandomHex(32) // 16 bytes / 128 bits entropy
+		ctx.SetContextValue("_cspScriptNonce", ret)
+	}
+	return ret
+}
+
+func (b *Base) SetHeaderContentSecurityPolicyGeneral() {
+	if csp := WebContentSecurityPolicy(CspScriptNonce(b)); csp != "" {
+		b.Resp.Header().Set("Content-Security-Policy", csp)
+	}
+}
+
+func NewBaseContext(resp http.ResponseWriter, req *http.Request) *Base {
+	reqCtx := reqctx.FromContext(req.Context())
+	b := &Base{
+		RequestContext: reqCtx,
+
+		Req:    req,
+		Resp:   WrapResponseWriter(resp),
+		Locale: middleware.Locale(resp, req),
+		Data:   reqCtx.GetData(),
 	}
 	b.Req = b.Req.WithContext(b)
-	b.AppendContextValue(translation.ContextKey, b.Locale)
-	b.AppendContextValue(httplib.RequestContextKey, b.Req)
-	return b, b.cleanUp
+	reqCtx.SetContextValue(BaseContextKey, b)
+	reqCtx.SetContextValue(translation.ContextKey, b.Locale)
+	reqCtx.SetContextValue(httplib.RequestContextKey, b.Req)
+	return b
+}
+
+func NewBaseContextForTest(resp http.ResponseWriter, req *http.Request) *Base {
+	if !setting.IsInTesting {
+		panic("This function is only for testing")
+	}
+	ctx := reqctx.NewRequestContextForTest(req.Context())
+	*req = *req.WithContext(ctx)
+	return NewBaseContext(resp, req)
 }

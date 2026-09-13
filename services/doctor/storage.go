@@ -9,16 +9,16 @@ import (
 	"io/fs"
 	"strings"
 
-	"code.gitea.io/gitea/models/git"
-	"code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/models/repo"
-	"code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/log"
-	packages_module "code.gitea.io/gitea/modules/packages"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/storage"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/models/git"
+	"gitea.dev/models/packages"
+	"gitea.dev/models/repo"
+	"gitea.dev/models/user"
+	"gitea.dev/modules/base"
+	"gitea.dev/modules/log"
+	packages_module "gitea.dev/modules/packages"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/storage"
+	"gitea.dev/modules/util"
 )
 
 type commonStorageCheckOptions struct {
@@ -27,7 +27,7 @@ type commonStorageCheckOptions struct {
 	name       string
 }
 
-func commonCheckStorage(ctx context.Context, logger log.Logger, autofix bool, opts *commonStorageCheckOptions) error {
+func commonCheckStorage(logger log.Logger, autofix bool, opts *commonStorageCheckOptions) error {
 	totalCount, orphanedCount := 0, 0
 	totalSize, orphanedSize := int64(0), int64(0)
 
@@ -98,7 +98,7 @@ func checkStorage(opts *checkStorageOptions) func(ctx context.Context, logger lo
 		}
 
 		if opts.Attachments || opts.All {
-			if err := commonCheckStorage(ctx, logger, autofix,
+			if err := commonCheckStorage(logger, autofix,
 				&commonStorageCheckOptions{
 					storer: storage.Attachments,
 					isOrphaned: func(path string, obj storage.Object, stat fs.FileInfo) (bool, error) {
@@ -116,12 +116,12 @@ func checkStorage(opts *checkStorageOptions) func(ctx context.Context, logger lo
 				logger.Info("LFS isn't enabled (skipped)")
 				return nil
 			}
-			if err := commonCheckStorage(ctx, logger, autofix,
+			if err := commonCheckStorage(logger, autofix,
 				&commonStorageCheckOptions{
 					storer: storage.LFS,
 					isOrphaned: func(path string, obj storage.Object, stat fs.FileInfo) (bool, error) {
 						// The oid of an LFS stored object is the name but with all the path.Separators removed
-						oid := strings.ReplaceAll(path, "/", "")
+						oid := strings.ReplaceAll(strings.ReplaceAll(path, "\\", ""), "/", "")
 						exists, err := git.ExistsLFSObject(ctx, oid)
 						return !exists, err
 					},
@@ -132,7 +132,7 @@ func checkStorage(opts *checkStorageOptions) func(ctx context.Context, logger lo
 		}
 
 		if opts.Avatars || opts.All {
-			if err := commonCheckStorage(ctx, logger, autofix,
+			if err := commonCheckStorage(logger, autofix,
 				&commonStorageCheckOptions{
 					storer: storage.Avatars,
 					isOrphaned: func(path string, obj storage.Object, stat fs.FileInfo) (bool, error) {
@@ -146,7 +146,7 @@ func checkStorage(opts *checkStorageOptions) func(ctx context.Context, logger lo
 		}
 
 		if opts.RepoAvatars || opts.All {
-			if err := commonCheckStorage(ctx, logger, autofix,
+			if err := commonCheckStorage(logger, autofix,
 				&commonStorageCheckOptions{
 					storer: storage.RepoAvatars,
 					isOrphaned: func(path string, obj storage.Object, stat fs.FileInfo) (bool, error) {
@@ -160,7 +160,7 @@ func checkStorage(opts *checkStorageOptions) func(ctx context.Context, logger lo
 		}
 
 		if opts.RepoArchives || opts.All {
-			if err := commonCheckStorage(ctx, logger, autofix,
+			if err := commonCheckStorage(logger, autofix,
 				&commonStorageCheckOptions{
 					storer: storage.RepoArchives,
 					isOrphaned: func(path string, obj storage.Object, stat fs.FileInfo) (bool, error) {
@@ -182,7 +182,7 @@ func checkStorage(opts *checkStorageOptions) func(ctx context.Context, logger lo
 				logger.Info("Packages isn't enabled (skipped)")
 				return nil
 			}
-			if err := commonCheckStorage(ctx, logger, autofix,
+			if err := commonCheckStorage(logger, autofix,
 				&commonStorageCheckOptions{
 					storer: storage.Packages,
 					isOrphaned: func(path string, obj storage.Object, stat fs.FileInfo) (bool, error) {
