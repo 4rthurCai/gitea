@@ -290,6 +290,21 @@ func GetActionsUserRepoPermission(ctx context.Context, repo *repo_model.Reposito
 		return perm, err
 	}
 
+	if task.RepoID != repo.ID {
+		if err := repo.LoadOwner(ctx); err != nil {
+			return perm, err
+		}
+		// Preserve focs-gitea 7066e1d9c1: task tokens can read shared actions repos.
+		if strings.EqualFold(repo.Owner.Name, "actions") {
+			if err := repo.LoadUnits(ctx); err != nil {
+				return perm, err
+			}
+			perm.AccessMode = perm_model.AccessModeRead
+			perm.SetUnitsWithDefaultAccessMode(repo.Units, perm_model.AccessModeRead)
+			return perm, nil
+		}
+	}
+
 	var taskRepo *repo_model.Repository
 	if task.RepoID != repo.ID {
 		if err := task.Job.LoadRepo(ctx); err != nil {

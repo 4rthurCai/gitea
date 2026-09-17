@@ -10,18 +10,18 @@
 
 ## 必须保留的定制
 
-| 定制 | 迁移检查点 |
-| --- | --- |
-| jAccount OAuth | provider、图标、账号/邮箱/姓名/学号映射及首次注册自动提交 |
-| 隐藏 HTTP clone | 保留 SSH clone 按钮，适配新版 DOM |
-| 用户资料限制 | 禁止修改姓名、邮箱隐私和位置；禁止自行删除账户 |
-| Wiki 活动 | 独立 Wiki 统计、作者头像和图表；适配新版仓库存储接口及 Vue/TypeScript |
-| CompanyStaff pretend | 保留公司团队选择和原有身份切换逻辑、`COMPANY_TEAM_NAME` 配置 |
-| 屏蔽用户限制 | 保留 fork 对普通用户的限制和原有组织规则 |
-| 通知 | 排除归档仓库的问题通知，并保留额外索引 |
-| Issue/PR 排序 | 默认按最近更新；显式选择其他排序仍可用 |
-| Actions | 保留额外索引、tag badge、badge message API 和 `no status` 响应 |
-| API 对象格式 | 原 fork 修复已由新版的 `ObjectFormatName` 转换覆盖 |
+| 定制                 | 迁移检查点                                                            |
+| -------------------- | --------------------------------------------------------------------- |
+| jAccount OAuth       | provider、图标、账号/邮箱/姓名/学号映射及首次注册自动提交             |
+| 隐藏 HTTP clone      | 保留 SSH clone 按钮，适配新版 DOM                                     |
+| 用户资料限制         | 禁止修改姓名、邮箱隐私和位置；禁止自行删除账户                        |
+| Wiki 活动            | 独立 Wiki 统计、作者头像和图表；适配新版仓库存储接口及 Vue/TypeScript |
+| CompanyStaff pretend | 保留公司团队选择和原有身份切换逻辑、`COMPANY_TEAM_NAME` 配置          |
+| 屏蔽用户限制         | 保留 fork 对普通用户的限制和原有组织规则                              |
+| 通知                 | 排除归档仓库的问题通知，并保留额外索引                                |
+| Issue/PR 排序        | 默认按最近更新；显式选择其他排序仍可用                                |
+| Actions              | 保留额外索引、tag badge、badge message API 和 `no status` 响应        |
+| API 对象格式         | 原 fork 修复已由新版的 `ObjectFormatName` 转换覆盖                    |
 
 跨版本迁移需要调整内部接口和模板，不能直接保持旧源代码逐字不变；定制业务行为是保留目标。
 

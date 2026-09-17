@@ -1,15 +1,17 @@
 package integration
 
 import (
+	"net/http"
+	"testing"
+
 	auth_model "gitea.dev/models/auth"
 	"gitea.dev/models/unittest"
 	user_model "gitea.dev/models/user"
 	api "gitea.dev/modules/structs"
 	repo_service "gitea.dev/services/repository"
 	"gitea.dev/tests"
+
 	"github.com/stretchr/testify/require"
-	"net/http"
-	"testing"
 )
 
 func TestForkBadgeMessage(t *testing.T) {

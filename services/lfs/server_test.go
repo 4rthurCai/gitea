@@ -102,3 +102,15 @@ func TestAuthenticate(t *testing.T) {
 		assert.NoError(t, err)
 	})
 }
+
+func TestAuthenticateForkSharedActionsRepository(t *testing.T) {
+	require.NoError(t, unittest.PrepareTestDatabase())
+	ctx, _ := contexttest.MockContext(t, "/")
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 2})
+	owner := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: repo.OwnerID})
+	_, err := db.GetEngine(ctx).ID(owner.ID).Cols("name").Update(&user_model.User{Name: "AcTiOnS"})
+	require.NoError(t, err)
+	ctx.Doer = user_model.NewActionsUserWithTaskID(47)
+	require.True(t, authenticate(ctx, repo, "", true, false))
+	require.False(t, authenticate(ctx, repo, "", true, true))
+}

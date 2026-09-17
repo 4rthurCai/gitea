@@ -182,7 +182,8 @@ func httpBase(ctx *context.Context, optGitService ...string) *serviceHandler {
 
 		if repoExist {
 			// Only the main code repo accepts refs/for pushes, so wiki pushes must keep write checks.
-			if git.DefaultFeatures().SupportProcReceive && !isWiki {
+			// Task tokens must retain write checks even when proc-receive is supported.
+			if git.DefaultFeatures().SupportProcReceive && !isWiki && !ctx.Doer.IsGiteaActions() {
 				accessMode = perm.AccessModeRead
 			}
 

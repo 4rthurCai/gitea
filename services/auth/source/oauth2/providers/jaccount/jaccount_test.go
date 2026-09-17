@@ -1,10 +1,11 @@
 package jaccount
 
 import (
-	"github.com/markbates/goth"
-	"github.com/stretchr/testify/require"
 	"strings"
 	"testing"
+
+	"github.com/markbates/goth"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUserFromReaderPreservesJAccountIdentity(t *testing.T) {
